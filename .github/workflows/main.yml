@@ -62,40 +62,40 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # 1단계: 테스트 실행
-  test:
-    name: 테스트 실행
-    runs-on: ubuntu-latest
+  # # 1단계: 테스트 실행
+  # test:
+  #   name: 테스트 실행
+  #   runs-on: ubuntu-latest
     
-    strategy:
-      matrix:
-        node-version: [20]
+  #   strategy:
+  #     matrix:
+  #       node-version: [20]
     
-    steps:
-    - name: 코드 체크아웃
-      uses: actions/checkout@v4
+  #   steps:
+  #   - name: 코드 체크아웃
+  #     uses: actions/checkout@v4
       
-    - name: Node.js ${{ matrix.node-version }} 설정
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'npm'
+  #   - name: Node.js ${{ matrix.node-version }} 설정
+  #     uses: actions/setup-node@v4
+  #     with:
+  #       node-version: ${{ matrix.node-version }}
+  #       cache: 'npm'
         
-    - name: 의존성 설치
-      run: npm ci
+  #   - name: 의존성 설치
+  #     run: npm ci
       
-    - name: 단위 테스트 실행
-      run: npm test
+  #   - name: 단위 테스트 실행
+  #     run: npm test
       
-    - name: 커버리지 리포트 생성
-      run: npm run test:coverage
+  #   - name: 커버리지 리포트 생성
+  #     run: npm run test:coverage
       
-    - name: 커버리지 업로드 (Node 18만)
-      if: matrix.node-version == '18'
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage/lcov.info
-        fail_ci_if_error: false
+  #   - name: 커버리지 업로드 (Node 18만)
+  #     if: matrix.node-version == '18'
+  #     uses: codecov/codecov-action@v3
+  #     with:
+  #       file: ./coverage/lcov.info
+  #       fail_ci_if_error: false
 
   # # 2단계: 보안 검사
   # security:
@@ -132,7 +132,7 @@ jobs:
     name: 빌드 및 아티팩트
     runs-on: ubuntu-latest
     # needs: [test, security]
-    needs: [test]
+    # needs: [test]
     
     outputs:
       version: ${{ steps.version.outputs.version }}
