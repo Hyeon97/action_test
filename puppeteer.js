@@ -15,6 +15,8 @@ const FUNC = (async (path) => {
         args: ["--window-size=1280,1080"]
         // args: ['--start-maximized']
 
+        //  test
+
     })
 
     const page = await browser.newPage()
