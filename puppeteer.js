@@ -1,58 +1,89 @@
 const puppeteer = require('puppeteer')
 
-const page = ['http://127.0.0.1']
+const pages = ['http://127.0.0.1:8080', 'https://example.com']
 
+const FUNC = async (path) => {
+    console.info("Puppeteer automation started")
+    console.info(`Testing URL: ${path}`)
 
-const FUNC = (async (path) => {
-    console.info("start")
-    const browser = await puppeteer.launch({
-        headless: false,
-        // 디폴트가 headless 라서 브라우저가 보이지 않으므로 false 해야 브라우저가 보임.
+    try {
+        const browser = await puppeteer.launch({
+            headless: process.env.NODE_ENV === 'production' ? 'new' : false,
+            // CI 환경에서는 headless 모드로 실행
 
-        executablePath: '',
-        // 디폴트가 puppetter 내장된 크롬 브라우저를 이용하므로 실행PC의 브라우저로 재설정
+            args: [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-accelerated-2d-canvas",
+                "--no-first-run",
+                "--no-zygote",
+                "--disable-gpu",
+                "--window-size=1280,1080"
+            ]
+            // CI 환경을 위한 Chrome 플래그 추가
+        })
 
-        args: ["--window-size=1280,1080"]
-        // args: ['--start-maximized']
+        const page = await browser.newPage()
 
-        //  testddddddㅇㄴㅇㄹㄴㅇ
+        await page.setViewport({
+            width: 1280,               // 페이지 너비
+            height: 1080,              // 페이지 높이
+            deviceScaleFactor: 1,      // 기기 배율 요소를 지정 DPR(Device Pixel Resolution)
+            isMobile: false,           // 모바일
+            hasTouch: false,           // 터치 이벤트 발생여부
+            isLandscape: false,        // 가로 모드
+        })
 
-    })
+        // 페이지 로드 및 기본 테스트
+        if (path.startsWith('http')) {
+            try {
+                await page.goto(path, { waitUntil: 'networkidle0', timeout: 30000 })
+                console.info(`Successfully loaded: ${path}`)
 
-    const page = await browser.newPage()
-    await page.goto(path)        // 테스트할 사이즈 주소입력
-    await page.setViewport({
+                // 페이지 타이틀 가져오기
+                const title = await page.title()
+                console.info(`Page title: ${title}`)
 
-        width: 1280,               // 페이지 너비
+                // 스크린샷 찍기 (CI 환경에서도 작동)
+                await page.screenshot({
+                    path: `screenshot-${Date.now()}.png`,
+                    fullPage: true
+                })
+                console.info("Screenshot captured")
 
-        height: 1080,                // 페이지 높이
+            } catch (error) {
+                console.error(`Failed to load ${path}:`, error.message)
+            }
+        } else {
+            // 로컬 파일이나 다른 형태의 URL 처리
+            console.info(`Skipping non-HTTP URL: ${path}`)
+        }
 
-        deviceScaleFactor: 1,     // 기기 배율 요소를 지정 DPR( Device Pixel Resolution )
+        await page.waitForTimeout(3000)     // 3초간 대기
+        await browser.close()               // 브라우저 종료
+        console.info("Browser closed successfully")
 
-        isMobile: false,            // 모바일
+    } catch (error) {
+        console.error("Puppeteer execution failed:", error)
+        process.exit(1)
+    }
+}
 
-        hasTouch: false,           // 터치 이벤트 발생여부
+// 메인 실행 함수
+const runTests = async () => {
+    console.info("Starting Puppeteer automation tests...")
 
-        isLandscape: false,        //
+    for (const pageUrl of pages) {
+        await FUNC(pageUrl)
+    }
 
-    })
-    // const dimensions = await page.evaluate(() => {
-    //     return {
-    //       width: document.documentElement.clientWidth,
-    //       height: document.documentElement.clientHeight,
-    //       deviceScaleFactor: window.devicePixelRatio,
-    //     };
-    //   });
+    console.info("All tests completed successfully")
+}
 
-    //   console.log('Dimensions:', dimensions);
+// 모듈로 호출되지 않은 경우에만 실행
+if (require.main === module) {
+    runTests()
+}
 
-    await page.waitForTimeout(3000)     // 눈으로 확인하기 위해 3초간 멈춤
-    // await browser.close();              // 브라우저 종료
-})
-
-
-// for(let el of page){
-//     FUNC(el)
-// }
-FUNC(page[0])
-
+module.exports = { FUNC, runTests }
