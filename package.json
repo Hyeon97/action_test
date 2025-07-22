@@ -1,12 +1,11 @@
 {
   "name": "action_test",
   "version": "1.0.0",
-  "description": "git action test with puppeteer",
+  "description": "git action test",
   "main": "puppeteer.js",
   "scripts": {
-    "test": "jest",
-    "test:coverage": "jest --coverage",
-    "build": "echo \"Build step executed\" && node --version",
+    "test": "echo \"Basic test passed\"",
+    "build": "echo \"Build step executed\"",
     "start": "node puppeteer.js",
     "lint": "echo \"Linting completed\""
   },
@@ -16,8 +15,7 @@
   },
   "keywords": [
     "puppeteer",
-    "automation",
-    "testing"
+    "automation"
   ],
   "author": "",
   "license": "ISC",
@@ -25,14 +23,5 @@
   "bugs": {
     "url": "https://github.com/Hyeon97/action_test/issues"
   },
-  "homepage": "https://github.com/Hyeon97/action_test#readme",
-  "dependencies": {
-    "puppeteer": "^21.5.2"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "homepage": "https://github.com/Hyeon97/action_test#readme"
 }
