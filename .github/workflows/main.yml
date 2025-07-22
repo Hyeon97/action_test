@@ -69,7 +69,7 @@ jobs:
     
     strategy:
       matrix:
-        node-version: [16, 18, 20]
+        node-version: [20]
     
     steps:
     - name: 코드 체크아웃
