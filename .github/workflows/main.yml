@@ -359,7 +359,6 @@ jobs:
         password: ${{ secrets.EMAIL_PASSWORD }}
         subject: "[CI/CD] 프로덕션 배포 ${{ job.status == 'success' && '성공' || '실패' }}"
         to: ${{ secrets.NOTIFICATION_EMAIL }}
-        # to: srchoi@zconverter.com
         from: ${{ secrets.EMAIL_USERNAME }}
         body: |
           프로덕션 배포가 ${{ job.status == 'success' && '성공적으로 완료' || '실패' }}되었습니다.
