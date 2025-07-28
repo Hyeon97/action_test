@@ -64,3 +64,22 @@ docker rmi $(docker images -f "dangling=true" -q)
 
 # 모든 이미지 삭제
 docker image prune -a
+
+
+```
+# 1. 간단한 Pod 생성
+kubectl run zdm-api-server \
+  --image=zcon-nipa-container-registry.kr.ncr.ntruss.com/zdm-api-server:latest \
+  --namespace=zdm-api \
+  --port=53307 \
+  --env="PORT=53307" \
+  --env="NODE_ENV=production"
+
+# 2. 상태 확인
+kubectl get pods -n zdm-api
+kubectl logs -f zdm-api-server -n zdm-api
+
+# 3. 포트포워딩으로 테스트
+kubectl port-forward zdm-api-server 8080:53307 -n zdm-api
+curl http://localhost:8080/
+```
