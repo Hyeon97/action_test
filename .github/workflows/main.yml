@@ -59,8 +59,8 @@ jobs:
           VERSION=${{ github.ref_name }}-${{ github.sha }}
         fi
         
-        # 고유한 태그 생성 (무중단 배포용)
-        UNIQUE_TAG="${{ github.ref_name }}-$(echo ${{ github.sha }} | cut -c1-8)-$(date +%Y%m%d-%H%M%S)"
+        # 간소화된 고유 태그 생성 (브랜치명-날짜-시간)
+        UNIQUE_TAG="${{ github.ref_name }}-$(date +%Y%m%d-%H%M%S)"
         
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "unique_tag=$UNIQUE_TAG" >> $GITHUB_OUTPUT
@@ -77,9 +77,9 @@ jobs:
           package-lock.json
         retention-days: 1
 
-  # 2단계: Docker 이미지 빌드 및 푸시
+  # 2단계: Docker 이미지 빌드 및 푸시 (간소화된 태그 전략)
   docker-build-push:
-    name: Docker Build and Push to NCP
+    name: Docker Build and Push (Simplified Tags)
     runs-on: ubuntu-latest
     needs: build-and-test
     # main, develop 브랜치의 push 이벤트에서만 실행
@@ -105,16 +105,14 @@ jobs:
         username: ${{ secrets.NCP_REGISTRY_USERNAME }}
         password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
-    - name: 🏷️ 메타데이터 추출 (다중 태그 전략)
+    - name: 🏷️ 메타데이터 추출 (간소화된 태그 전략)
       id: meta
       uses: docker/metadata-action@v5
       with:
         images: ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}
         tags: |
           type=ref,event=branch
-          type=raw,value=latest,enable={{is_default_branch}}
           type=raw,value=${{ needs.build-and-test.outputs.unique_tag }}
-          type=raw,value={{date 'YYYYMMDD-HHmmss'}}
         labels: |
           org.opencontainers.image.title=${{ env.PROJECT_NAME }}
           org.opencontainers.image.description=TypeScript Server for ${{ env.PROJECT_NAME }}
@@ -123,7 +121,7 @@ jobs:
           org.opencontainers.image.revision=${{ github.sha }}
           org.opencontainers.image.created={{date 'YYYY-MM-DDTHH:mm:ssZ'}}
           
-    - name: 🐳 Docker 이미지 빌드 및 푸시 (다중 태그)
+    - name: 🐳 Docker 이미지 빌드 및 푸시 (간소화된 태그)
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -139,8 +137,9 @@ jobs:
         echo "🎉 Successfully pushed to NCP Container Registry!"
         echo "📍 Registry: ${{ env.REGISTRY_URL }}"
         echo "📍 Repository: ${{ env.PROJECT_NAME }}"
+        echo "📍 Branch Tag: ${{ github.ref_name }}"
         echo "📍 Unique Tag: ${{ needs.build-and-test.outputs.unique_tag }}"
-        echo "📍 All Tags:"
+        echo "📍 Generated Tags:"
         echo "${{ steps.meta.outputs.tags }}" | while read tag; do
           echo "   - $tag"
         done
@@ -151,9 +150,9 @@ jobs:
         docker builder prune -f
         echo "✅ Build cache cleaned up"
 
-  # 3단계: 강화된 이미지 검증
+  # 3단계: 간소화된 태그 이미지 검증
   verify-image:
-    name: Enhanced Image Verification
+    name: Simplified Tag Image Verification
     runs-on: ubuntu-latest
     needs: [build-and-test, docker-build-push]
     # Docker 이미지가 푸시된 경우에만 실행
@@ -169,9 +168,9 @@ jobs:
         username: ${{ secrets.NCP_REGISTRY_USERNAME }}
         password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
-    - name: 🔍 강화된 이미지 검증 및 캐시 정리
+    - name: 🔍 간소화된 태그 이미지 검증 및 캐시 정리
       run: |
-        echo "🔍 Enhanced image verification with comprehensive cache cleanup..."
+        echo "🔍 Simplified tag image verification with comprehensive cache cleanup..."
         
         # Docker 캐시 완전 정리 (최신 이미지 확실히 다운로드)
         echo "🧹 Comprehensive Docker cache cleanup..."
@@ -179,57 +178,57 @@ jobs:
         docker builder prune -af
         echo "✅ All Docker cache cleaned"
         
-        # 고유 태그와 latest 태그 모두 검증
+        # 브랜치명 태그와 고유 태그 모두 검증
         UNIQUE_TAG="${{ needs.build-and-test.outputs.unique_tag }}"
-        LATEST_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest"
+        BRANCH_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${{ github.ref_name }}"
         UNIQUE_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${UNIQUE_TAG}"
         
         echo "📦 Verifying images:"
-        echo "   - Latest: $LATEST_IMAGE"
+        echo "   - Branch: $BRANCH_IMAGE"
         echo "   - Unique: $UNIQUE_IMAGE"
         
-        # latest 이미지 강제 다운로드 및 검증
-        if docker pull "$LATEST_IMAGE" --disable-content-trust; then
-          echo "✅ Latest image pull successful"
+        # 브랜치명 이미지 강제 다운로드 및 검증
+        if docker pull "$BRANCH_IMAGE" --disable-content-trust; then
+          echo "✅ Branch image pull successful"
           
           # 고유 태그 이미지도 검증
           if docker pull "$UNIQUE_IMAGE" --disable-content-trust; then
             echo "✅ Unique tag image pull successful"
           else
-            echo "⚠️ Unique tag image not found, but latest is available"
+            echo "⚠️ Unique tag image not found, but branch image is available"
           fi
           
           # 상세한 이미지 정보 출력
-          echo "📋 Latest image information:"
-          docker images "$LATEST_IMAGE" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}\t{{.Size}}"
+          echo "📋 Branch image information:"
+          docker images "$BRANCH_IMAGE" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}\t{{.Size}}"
           
           # 이미지 메타데이터 상세 분석
           echo "📋 Detailed image metadata:"
-          echo "🕐 Created: $(docker inspect "$LATEST_IMAGE" --format='{{.Created}}')"
-          echo "🆔 Image ID: $(docker inspect "$LATEST_IMAGE" --format='{{.Id}}')"
-          echo "🏗️ Architecture: $(docker inspect "$LATEST_IMAGE" --format='{{.Architecture}}')"
-          echo "📊 Size: $(docker inspect "$LATEST_IMAGE" --format='{{.Size}}' | numfmt --to=iec)"
-          echo "🔗 Parent: $(docker inspect "$LATEST_IMAGE" --format='{{.Parent}}')"
+          echo "🕐 Created: $(docker inspect "$BRANCH_IMAGE" --format='{{.Created}}')"
+          echo "🆔 Image ID: $(docker inspect "$BRANCH_IMAGE" --format='{{.Id}}')"
+          echo "🏗️ Architecture: $(docker inspect "$BRANCH_IMAGE" --format='{{.Architecture}}')"
+          echo "📊 Size: $(docker inspect "$BRANCH_IMAGE" --format='{{.Size}}' | numfmt --to=iec)"
+          echo "🔗 Parent: $(docker inspect "$BRANCH_IMAGE" --format='{{.Parent}}')"
           
           # 이미지 레이어 히스토리 분석
           echo "📋 Image build history (last 10 layers):"
-          docker history "$LATEST_IMAGE" --no-trunc --format "table {{.CreatedBy}}\t{{.CreatedAt}}\t{{.Size}}" | head -11
+          docker history "$BRANCH_IMAGE" --no-trunc --format "table {{.CreatedBy}}\t{{.CreatedAt}}\t{{.Size}}" | head -11
           
           # 이미지 내부 구조 확인
           echo "📋 Image internal structure:"
-          docker run --rm "$LATEST_IMAGE" ls -la / | head -20 || echo "⚠️ Could not list root directory"
+          docker run --rm "$BRANCH_IMAGE" ls -la / | head -20 || echo "⚠️ Could not list root directory"
           
           # 애플리케이션 디렉토리 확인
           echo "📋 Application directory structure:"
-          docker run --rm "$LATEST_IMAGE" ls -la /app/ | head -20 || echo "⚠️ /app directory not accessible"
+          docker run --rm "$BRANCH_IMAGE" ls -la /app/ | head -20 || echo "⚠️ /app directory not accessible"
           
           # package.json 확인 (버전 정보)
           echo "📋 Application version info:"
-          docker run --rm "$LATEST_IMAGE" cat /app/package.json | grep -E '"(name|version)"' || echo "⚠️ package.json not found"
+          docker run --rm "$BRANCH_IMAGE" cat /app/package.json | grep -E '"(name|version)"' || echo "⚠️ package.json not found"
           
           # 컨테이너 실행 테스트
           echo "🚀 Container runtime testing..."
-          CONTAINER_ID=$(docker run -d -p 8080:53307 "$LATEST_IMAGE")
+          CONTAINER_ID=$(docker run -d -p 8080:53307 "$BRANCH_IMAGE")
           
           # 컨테이너 시작 대기 및 상태 확인
           echo "⏳ Waiting for container to initialize..."
@@ -291,7 +290,7 @@ jobs:
           exit 1
         fi
         
-        echo "✅ Enhanced image verification completed successfully"
+        echo "✅ Simplified tag image verification completed successfully"
 
   # 4단계: 무중단 Kubernetes 배포
   deploy-to-kubernetes:
@@ -429,7 +428,7 @@ jobs:
         # 고유 태그로 새 이미지 준비
         UNIQUE_TAG="${{ needs.build-and-test.outputs.unique_tag }}"
         NEW_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${UNIQUE_TAG}"
-        FALLBACK_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest"
+        FALLBACK_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${{ github.ref_name }}"
         
         echo "📦 Target images:"
         echo "   Primary: $NEW_IMAGE"
@@ -444,7 +443,7 @@ jobs:
           echo "✅ Using unique tag image: $DEPLOY_IMAGE"
         elif docker manifest inspect "$FALLBACK_IMAGE" >/dev/null 2>&1; then
           DEPLOY_IMAGE="$FALLBACK_IMAGE"
-          echo "⚠️ Falling back to latest tag: $DEPLOY_IMAGE"
+          echo "⚠️ Falling back to branch tag: $DEPLOY_IMAGE"
         else
           echo "❌ Neither image found in registry"
           exit 1
@@ -683,16 +682,16 @@ jobs:
         server_port: 587
         username: ${{ secrets.EMAIL_USERNAME }}
         password: ${{ secrets.EMAIL_PASSWORD }}
-        subject: "[NCP] ${{ env.PROJECT_NAME }} 무중단 배포 결과: ${{ (needs.docker-build-push.result == 'success' && (needs.deploy-to-kubernetes.result == 'success' || needs.deploy-to-kubernetes.result == 'skipped')) && '✅ 성공' || '❌ 실패' }}"
+        subject: "[NCP] ${{ env.PROJECT_NAME }} 간소화된 무중단 배포 결과: ${{ (needs.docker-build-push.result == 'success' && (needs.deploy-to-kubernetes.result == 'success' || needs.deploy-to-kubernetes.result == 'skipped')) && '✅ 성공' || '❌ 실패' }}"
         to: ${{ secrets.NOTIFICATION_EMAIL }}
         from: ${{ secrets.EMAIL_USERNAME }}
         body: |
-          ${{ env.PROJECT_NAME }} 무중단 Docker 이미지 빌드 및 Kubernetes 배포가 완료되었습니다.
+          ${{ env.PROJECT_NAME }} 간소화된 태그 전략을 사용한 무중단 Docker 이미지 빌드 및 Kubernetes 배포가 완료되었습니다.
 
           ## 🎯 배포 결과 종합 요약
           - 📦 빌드 및 테스트: ${{ needs.build-and-test.result }} ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }}
           - 🐳 Docker 빌드 & 푸시: ${{ needs.docker-build-push.result }} ${{ needs.docker-build-push.result == 'success' && '✅' || '❌' }}
-          - 🔍 강화된 이미지 검증: ${{ needs.verify-image.result }} ${{ needs.verify-image.result == 'success' && '✅' || '❌' }}
+          - 🔍 간소화된 이미지 검증: ${{ needs.verify-image.result }} ${{ needs.verify-image.result == 'success' && '✅' || '❌' }}
           - 🚀 무중단 Kubernetes 배포: ${{ needs.deploy-to-kubernetes.result }} ${{ needs.deploy-to-kubernetes.result == 'success' && '✅' || needs.deploy-to-kubernetes.result == 'skipped' && '⏭️' || '❌' }}
 
           ## 📋 프로젝트 정보
@@ -708,10 +707,9 @@ jobs:
           ## 🐳 Docker 이미지
           ${{ needs.docker-build-push.result == 'success' && format('**성공적으로 푸시된 이미지:**
           ```
-          {0}/{1}:latest
           {0}/{1}:{2}
           {0}/{1}:{3}
-          ```', env.REGISTRY_URL, env.PROJECT_NAME, needs.build-and-test.outputs.unique_tag, needs.build-and-test.outputs.version) || '❌ 이미지 빌드 실패' }}
+          ```', env.REGISTRY_URL, env.PROJECT_NAME, github.ref_name, needs.build-and-test.outputs.unique_tag) || '❌ 이미지 빌드 실패' }}
 
           ## ⚙️ Kubernetes 배포 정보
           ${{ needs.deploy-to-kubernetes.result == 'success' && format('**배포 성공:**
@@ -730,27 +728,28 @@ jobs:
           🤖 GitHub Actions에서 자동 발송
       if: always()
       
-    - name: 📊 최종 CI/CD 파이프라인 요약
+    - name: 📊 간소화된 CI/CD 파이프라인 요약
       run: |
-        echo "## 🎯 완전 자동화 CI/CD 파이프라인 최종 요약" >> $GITHUB_STEP_SUMMARY
+        echo "## 🎯 간소화된 태그 전략 CI/CD 파이프라인 최종 요약" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| 단계 | 결과 | 상태 | 설명 |" >> $GITHUB_STEP_SUMMARY
         echo "|------|------|------|------|" >> $GITHUB_STEP_SUMMARY
-        echo "| 빌드 및 테스트 | ${{ needs.build-and-test.result }} | ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }} | TypeScript 빌드, 버전 생성 |" >> $GITHUB_STEP_SUMMARY
-        echo "| Docker 빌드 & 푸시 | ${{ needs.docker-build-push.result }} | ${{ needs.docker-build-push.result == 'success' && '✅' || '❌' }} | 다중 태그 전략, NCP Registry |" >> $GITHUB_STEP_SUMMARY
-        echo "| 강화된 이미지 검증 | ${{ needs.verify-image.result }} | ${{ needs.verify-image.result == 'success' && '✅' || '❌' }} | 캐시 정리, 상세 검증 |" >> $GITHUB_STEP_SUMMARY
+        echo "| 빌드 및 테스트 | ${{ needs.build-and-test.result }} | ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }} | TypeScript 빌드, 간소화된 태그 생성 |" >> $GITHUB_STEP_SUMMARY
+        echo "| Docker 빌드 & 푸시 | ${{ needs.docker-build-push.result }} | ${{ needs.docker-build-push.result == 'success' && '✅' || '❌' }} | 간소화된 태그 전략, NCP Registry |" >> $GITHUB_STEP_SUMMARY
+        echo "| 간소화된 이미지 검증 | ${{ needs.verify-image.result }} | ${{ needs.verify-image.result == 'success' && '✅' || '❌' }} | 캐시 정리, 브랜치명 태그 검증 |" >> $GITHUB_STEP_SUMMARY
         echo "| 무중단 K8s 배포 | ${{ needs.deploy-to-kubernetes.result }} | ${{ needs.deploy-to-kubernetes.result == 'success' && '✅' || needs.deploy-to-kubernetes.result == 'skipped' && '⏭️' || '❌' }} | 롤링 업데이트, 고유 태그 |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🚀 핵심 개선사항" >> $GITHUB_STEP_SUMMARY
-        echo "- **고유 태그 전략**: 매번 새로운 이미지로 확실한 업데이트" >> $GITHUB_STEP_SUMMARY
+        echo "- **간소화된 태그 전략**: 브랜치명 + 브랜치명-날짜시간 형식만 사용" >> $GITHUB_STEP_SUMMARY
         echo "- **강화된 캐시 정리**: Docker 캐시 완전 제거로 최신 이미지 보장" >> $GITHUB_STEP_SUMMARY
         echo "- **무중단 배포**: 롤링 업데이트로 서비스 중단 없음" >> $GITHUB_STEP_SUMMARY
         echo "- **상세한 검증**: 이미지 메타데이터, 애플리케이션 구조 확인" >> $GITHUB_STEP_SUMMARY
         echo "- **Service Account Token**: 안정적인 Kubernetes 인증" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📦 생성된 이미지 태그" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 생성된 이미지 태그 (간소화됨)" >> $GITHUB_STEP_SUMMARY
         echo "- **레지스트리**: \`${{ env.REGISTRY_URL }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **프로젝트**: \`${{ env.PROJECT_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **브랜치 태그**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **고유 태그**: \`${{ needs.build-and-test.outputs.unique_tag }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **버전**: \`${{ needs.build-and-test.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **브랜치**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY

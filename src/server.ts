@@ -12,7 +12,7 @@ app.use(express.json())
 
 // GET "/" 엔드포인트
 app.get('/', (req: Request, res: Response) => {
-  res.send('Server is Running in NKS (2).')
+  res.send('Server is Running in NKS (3).')
 })
 
 // 서버 시작
