@@ -85,8 +85,8 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY_URL }}
-        # username: ${{ secrets.NCP_REGISTRY_USERNAME }}
-        # password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
+        username: ${{ secrets.NCP_REGISTRY_USERNAME }}
+        password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
     - name: 🏷️ 메타데이터 추출
       id: meta
@@ -144,8 +144,8 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY_URL }}
-        # username: ${{ secrets.NCP_REGISTRY_USERNAME }}
-        # password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
+        username: ${{ secrets.NCP_REGISTRY_USERNAME }}
+        password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
     - name: 🔍 이미지 검증
       run: |
