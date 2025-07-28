@@ -66,7 +66,13 @@ docker rmi $(docker images -f "dangling=true" -q)
 docker image prune -a
 
 
+## CD
 ```
+# Object Storage에서 image pull 하기
+docker pull zcon-nipa-container-registry.kr.ncr.ntruss.com/zdm-api-server:latest
+
+# docker registry 인증정보 생성
+
 # 1. 간단한 Pod 생성
 kubectl run zdm-api-server \
   --image=zcon-nipa-container-registry.kr.ncr.ntruss.com/zdm-api-server:latest \
@@ -82,4 +88,11 @@ kubectl logs -f zdm-api-server -n zdm-api
 # 3. 포트포워딩으로 테스트
 kubectl port-forward zdm-api-server 8080:53307 -n zdm-api
 curl http://localhost:8080/
+
+# 98. 시크릿
+kubectl get secrets -n zdm-api
+# 시크릿 삭제
+kubectl delete secret ncp-registry-secret -n zdm-api
+# 99. Pod 삭제
+kubectl delete pod zdm-api-server -n zdm-api
 ```
