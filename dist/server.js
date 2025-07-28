@@ -13,7 +13,7 @@ const PORT = parseInt(process.env.PORT || '53307', 10);
 app.use(express_1.default.json());
 // GET "/" 엔드포인트
 app.get('/', (req, res) => {
-    res.send('Server is running in nks.');
+    res.send('Server is Running in NKS (2).');
 });
 // 서버 시작
 app.listen(PORT, () => {
