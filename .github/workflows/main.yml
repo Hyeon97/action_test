@@ -223,20 +223,55 @@ jobs:
       with:
         version: 'v1.28.0'
         
+    - name: 🔐 NKS 클러스터 인증 설정
+      run: |
+        echo "🔐 Setting up NKS cluster authentication..."
+        
+        # kubeconfig 파일 생성
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 -d > $HOME/.kube/config
+        chmod 600 $HOME/.kube/config
+        
+        # 클러스터 연결 테스트
+        kubectl cluster-info
+        kubectl get nodes
+        
+        echo "✅ Successfully connected to NKS cluster"
+        
     - name: 🔍 현재 배포 상태 확인
       run: |
         echo "🔍 Checking current deployment status..."
         
+        # namespace 존재 확인
+        if ! kubectl get namespace ${{ env.K8S_NAMESPACE }} >/dev/null 2>&1; then
+          echo "❌ Namespace ${{ env.K8S_NAMESPACE }} does not exist!"
+          exit 1
+        fi
+        
+        # deployment 존재 확인
+        if ! kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} >/dev/null 2>&1; then
+          echo "❌ Deployment ${{ env.K8S_DEPLOYMENT_NAME }} does not exist!"
+          exit 1
+        fi
+        
         # 현재 배포 상태 (이미 존재하는 Deployment)
         echo "📋 Current deployment status:"
-        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide
+        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide || {
+          echo "❌ Failed to get deployment status"
+          exit 1
+        }
         
         echo "📋 Current image:"
-        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}'
+        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}' || {
+          echo "❌ Failed to get current image"
+          exit 1
+        }
         echo ""
         
         echo "📋 Current pods:"
-        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api
+        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api || {
+          echo "⚠️ Warning: Failed to get pods, but continuing..."
+        }
         
     - name: 🚀 Kubernetes 배포 업데이트
       run: |
