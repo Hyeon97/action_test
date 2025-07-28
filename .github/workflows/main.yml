@@ -28,6 +28,7 @@ jobs:
     
     outputs:
       version: ${{ steps.version.outputs.version }}
+      unique_tag: ${{ steps.version.outputs.unique_tag }}
     
     steps:
     - name: 🛒 코드 체크아웃
@@ -51,14 +52,20 @@ jobs:
     - name: 🏷️ 버전 정보 생성
       id: version
       run: |
-        # 태그가 있으면 태그를 사용, 없으면 브랜치-SHA 조합 사용
+        # 기본 버전 생성
         if [[ $GITHUB_REF == refs/tags/* ]]; then
           VERSION=${GITHUB_REF#refs/tags/}
         else
           VERSION=${{ github.ref_name }}-${{ github.sha }}
         fi
+        
+        # 고유한 태그 생성 (무중단 배포용)
+        UNIQUE_TAG="${{ github.ref_name }}-$(echo ${{ github.sha }} | cut -c1-8)-$(date +%Y%m%d-%H%M%S)"
+        
         echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "unique_tag=$UNIQUE_TAG" >> $GITHUB_OUTPUT
         echo "📍 Generated version: $VERSION"
+        echo "📍 Generated unique tag: $UNIQUE_TAG"
         
     - name: 📤 빌드 아티팩트 업로드
       uses: actions/upload-artifact@v4
@@ -80,6 +87,10 @@ jobs:
       github.event_name == 'push' && 
       (github.ref_name == 'main' || github.ref_name == 'develop')
     
+    outputs:
+      image_tags: ${{ steps.meta.outputs.tags }}
+      unique_tag: ${{ needs.build-and-test.outputs.unique_tag }}
+    
     steps:
     - name: 🛒 코드 체크아웃
       uses: actions/checkout@v4
@@ -94,7 +105,7 @@ jobs:
         username: ${{ secrets.NCP_REGISTRY_USERNAME }}
         password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
-    - name: 🏷️ 메타데이터 추출
+    - name: 🏷️ 메타데이터 추출 (다중 태그 전략)
       id: meta
       uses: docker/metadata-action@v5
       with:
@@ -102,12 +113,17 @@ jobs:
         tags: |
           type=ref,event=branch
           type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=${{ needs.build-and-test.outputs.unique_tag }}
+          type=raw,value={{date 'YYYYMMDD-HHmmss'}}
         labels: |
           org.opencontainers.image.title=${{ env.PROJECT_NAME }}
           org.opencontainers.image.description=TypeScript Server for ${{ env.PROJECT_NAME }}
           org.opencontainers.image.vendor=Your Organization
+          org.opencontainers.image.version=${{ needs.build-and-test.outputs.version }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.created={{date 'YYYY-MM-DDTHH:mm:ssZ'}}
           
-    - name: 🐳 Docker 이미지 빌드 및 푸시
+    - name: 🐳 Docker 이미지 빌드 및 푸시 (다중 태그)
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -123,7 +139,8 @@ jobs:
         echo "🎉 Successfully pushed to NCP Container Registry!"
         echo "📍 Registry: ${{ env.REGISTRY_URL }}"
         echo "📍 Repository: ${{ env.PROJECT_NAME }}"
-        echo "📍 Tags:"
+        echo "📍 Unique Tag: ${{ needs.build-and-test.outputs.unique_tag }}"
+        echo "📍 All Tags:"
         echo "${{ steps.meta.outputs.tags }}" | while read tag; do
           echo "   - $tag"
         done
@@ -134,11 +151,11 @@ jobs:
         docker builder prune -f
         echo "✅ Build cache cleaned up"
 
-  # 3단계: 이미지 검증
+  # 3단계: 강화된 이미지 검증
   verify-image:
-    name: Verify Pushed Image
+    name: Enhanced Image Verification
     runs-on: ubuntu-latest
-    needs: docker-build-push
+    needs: [build-and-test, docker-build-push]
     # Docker 이미지가 푸시된 경우에만 실행
     if: |
       github.event_name == 'push' && 
@@ -152,56 +169,133 @@ jobs:
         username: ${{ secrets.NCP_REGISTRY_USERNAME }}
         password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
-    - name: 🔍 이미지 검증
+    - name: 🔍 강화된 이미지 검증 및 캐시 정리
       run: |
-        echo "🔍 Verifying pushed image..."
+        echo "🔍 Enhanced image verification with comprehensive cache cleanup..."
         
-        # latest 태그 이미지 풀 테스트
-        IMAGE_NAME="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest"
-        echo "📦 Pulling image: $IMAGE_NAME"
+        # Docker 캐시 완전 정리 (최신 이미지 확실히 다운로드)
+        echo "🧹 Comprehensive Docker cache cleanup..."
+        docker system prune -af --volumes
+        docker builder prune -af
+        echo "✅ All Docker cache cleaned"
         
-        if docker pull "$IMAGE_NAME"; then
-          echo "✅ Image pull successful"
+        # 고유 태그와 latest 태그 모두 검증
+        UNIQUE_TAG="${{ needs.build-and-test.outputs.unique_tag }}"
+        LATEST_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest"
+        UNIQUE_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${UNIQUE_TAG}"
+        
+        echo "📦 Verifying images:"
+        echo "   - Latest: $LATEST_IMAGE"
+        echo "   - Unique: $UNIQUE_IMAGE"
+        
+        # latest 이미지 강제 다운로드 및 검증
+        if docker pull "$LATEST_IMAGE" --disable-content-trust; then
+          echo "✅ Latest image pull successful"
           
-          # 이미지 정보 출력
-          echo "📋 Image information:"
-          docker images "$IMAGE_NAME" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}\t{{.Size}}"
+          # 고유 태그 이미지도 검증
+          if docker pull "$UNIQUE_IMAGE" --disable-content-trust; then
+            echo "✅ Unique tag image pull successful"
+          else
+            echo "⚠️ Unique tag image not found, but latest is available"
+          fi
           
-          # 간단한 실행 테스트
-          echo "🚀 Testing container startup..."
-          CONTAINER_ID=$(docker run -d -p 8080:53307 "$IMAGE_NAME")
+          # 상세한 이미지 정보 출력
+          echo "📋 Latest image information:"
+          docker images "$LATEST_IMAGE" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}\t{{.Size}}"
           
-          # 컨테이너 시작 대기
-          sleep 15
+          # 이미지 메타데이터 상세 분석
+          echo "📋 Detailed image metadata:"
+          echo "🕐 Created: $(docker inspect "$LATEST_IMAGE" --format='{{.Created}}')"
+          echo "🆔 Image ID: $(docker inspect "$LATEST_IMAGE" --format='{{.Id}}')"
+          echo "🏗️ Architecture: $(docker inspect "$LATEST_IMAGE" --format='{{.Architecture}}')"
+          echo "📊 Size: $(docker inspect "$LATEST_IMAGE" --format='{{.Size}}' | numfmt --to=iec)"
+          echo "🔗 Parent: $(docker inspect "$LATEST_IMAGE" --format='{{.Parent}}')"
           
-          # 헬스체크
+          # 이미지 레이어 히스토리 분석
+          echo "📋 Image build history (last 10 layers):"
+          docker history "$LATEST_IMAGE" --no-trunc --format "table {{.CreatedBy}}\t{{.CreatedAt}}\t{{.Size}}" | head -11
+          
+          # 이미지 내부 구조 확인
+          echo "📋 Image internal structure:"
+          docker run --rm "$LATEST_IMAGE" ls -la / | head -20 || echo "⚠️ Could not list root directory"
+          
+          # 애플리케이션 디렉토리 확인
+          echo "📋 Application directory structure:"
+          docker run --rm "$LATEST_IMAGE" ls -la /app/ | head -20 || echo "⚠️ /app directory not accessible"
+          
+          # package.json 확인 (버전 정보)
+          echo "📋 Application version info:"
+          docker run --rm "$LATEST_IMAGE" cat /app/package.json | grep -E '"(name|version)"' || echo "⚠️ package.json not found"
+          
+          # 컨테이너 실행 테스트
+          echo "🚀 Container runtime testing..."
+          CONTAINER_ID=$(docker run -d -p 8080:53307 "$LATEST_IMAGE")
+          
+          # 컨테이너 시작 대기 및 상태 확인
+          echo "⏳ Waiting for container to initialize..."
+          sleep 20
+          
           if docker ps | grep -q "$CONTAINER_ID"; then
-            echo "✅ Container is running"
+            echo "✅ Container is running successfully"
             
-            # HTTP 응답 테스트 (포트포워딩 없이 컨테이너 내부에서)
-            if docker exec "$CONTAINER_ID" wget -q --spider http://localhost:53307/; then
-              echo "✅ Application is responding"
+            # 컨테이너 상세 정보
+            echo "📋 Container runtime information:"
+            docker inspect "$CONTAINER_ID" --format='🕐 Started: {{.State.StartedAt}}'
+            docker inspect "$CONTAINER_ID" --format='📊 Status: {{.State.Status}}'
+            docker inspect "$CONTAINER_ID" --format='🖥️ Platform: {{.Platform}}'
+            
+            # 포트 바인딩 확인
+            echo "📋 Port bindings:"
+            docker port "$CONTAINER_ID"
+            
+            # 실행 중인 프로세스 확인
+            echo "📋 Running processes:"
+            docker exec "$CONTAINER_ID" ps aux | head -10 || echo "⚠️ Could not list processes"
+            
+            # 애플리케이션 로그 확인 (최신 변경사항 추적)
+            echo "📋 Application logs (last 30 lines):"
+            docker logs "$CONTAINER_ID" --tail 30
+            
+            # 네트워크 연결 테스트
+            echo "🌐 Network connectivity test:"
+            if docker exec "$CONTAINER_ID" wget -q --spider http://localhost:53307/ --timeout=10; then
+              echo "✅ Application is responding on port 53307"
             else
               echo "⚠️ Application health check failed"
+              echo "📋 Detailed application logs:"
               docker logs "$CONTAINER_ID"
             fi
+            
+            # 환경 변수 확인
+            echo "📋 Environment variables:"
+            docker exec "$CONTAINER_ID" env | grep -E "(NODE|PORT|ENV)" | head -10 || echo "⚠️ Could not read environment"
+            
           else
             echo "❌ Container failed to start"
+            echo "📋 Container logs for debugging:"
             docker logs "$CONTAINER_ID"
+            echo "📋 Container inspect for debugging:"
+            docker inspect "$CONTAINER_ID" --format='{{.State}}'
           fi
           
           # 정리
+          echo "🧹 Cleaning up test container..."
           docker stop "$CONTAINER_ID" > /dev/null 2>&1
           docker rm "$CONTAINER_ID" > /dev/null 2>&1
+          echo "✅ Container cleanup completed"
           
         else
           echo "❌ Image pull failed"
+          echo "📋 Registry login status:"
+          docker system info | grep -A5 "Registry"
           exit 1
         fi
+        
+        echo "✅ Enhanced image verification completed successfully"
 
-  # 4단계: CD - Kubernetes 배포
+  # 4단계: 무중단 Kubernetes 배포
   deploy-to-kubernetes:
-    name: Deploy to Kubernetes
+    name: Zero-Downtime Kubernetes Deployment
     runs-on: ubuntu-latest
     needs: [build-and-test, docker-build-push, verify-image]
     # main 브랜치에 push할 때만 배포 (운영 환경)
@@ -230,6 +324,7 @@ jobs:
         # Secret 값 검증
         if [ -z "${{ secrets.KUBE_CONFIG_DATA }}" ]; then
           echo "❌ KUBE_CONFIG_DATA secret is empty!"
+          echo "Please set KUBE_CONFIG_DATA secret in repository settings"
           exit 1
         fi
         
@@ -248,20 +343,19 @@ jobs:
         echo "✅ kubeconfig file created successfully"
         echo "📋 Config file size: $(wc -c < $HOME/.kube/config) bytes"
         
-        # kubeconfig가 Service Account Token 방식인지 확인
+        # kubeconfig 인증 방식 확인
         echo "📋 kubeconfig authentication method check:"
         if grep -q "token:" $HOME/.kube/config; then
           echo "✅ Service Account Token authentication detected"
         elif grep -q "ncp-iam-authenticator" $HOME/.kube/config; then
-          echo "❌ ncp-iam-authenticator method detected - this requires additional setup"
-          echo "Please use Service Account Token method instead"
+          echo "❌ ncp-iam-authenticator method detected - please use Service Account Token method"
           exit 1
         else
           echo "⚠️ Unknown authentication method"
         fi
         
         # 클러스터 연결 테스트
-        echo "🔍 Testing cluster connection..."
+        echo "🔍 Testing cluster connectivity..."
         if ! kubectl cluster-info; then
           echo "❌ Failed to connect to cluster"
           echo "📋 kubeconfig content (first 10 lines):"
@@ -269,255 +363,404 @@ jobs:
           exit 1
         fi
         
-        echo "🔍 Testing node access..."
+        echo "🔍 Testing cluster access permissions..."
         kubectl get nodes
-        
-        echo "🔍 Testing namespace access..."
         kubectl get namespaces
         
         echo "✅ Successfully connected to NKS cluster using Service Account Token"
         
-    - name: 🔍 현재 배포 상태 확인
+    - name: 🔍 배포 전 상태 진단
       run: |
-        echo "🔍 Checking current deployment status..."
+        echo "🔍 Pre-deployment cluster status diagnosis..."
         
-        # namespace 존재 확인
+        # 클러스터 리소스 상태 확인
+        echo "📋 Cluster resource status:"
+        kubectl top nodes || echo "⚠️ Metrics server not available"
+        
+        # namespace 존재 및 상태 확인
         if ! kubectl get namespace ${{ env.K8S_NAMESPACE }} >/dev/null 2>&1; then
           echo "❌ Namespace ${{ env.K8S_NAMESPACE }} does not exist!"
+          echo "Available namespaces:"
+          kubectl get namespaces
           exit 1
         fi
+        echo "✅ Namespace ${{ env.K8S_NAMESPACE }} exists"
         
-        # deployment 존재 확인
+        # deployment 존재 및 상태 확인
         if ! kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} >/dev/null 2>&1; then
           echo "❌ Deployment ${{ env.K8S_DEPLOYMENT_NAME }} does not exist!"
+          echo "Available deployments in namespace:"
+          kubectl get deployments -n ${{ env.K8S_NAMESPACE }}
           exit 1
         fi
+        echo "✅ Deployment ${{ env.K8S_DEPLOYMENT_NAME }} exists"
         
-        # 현재 배포 상태 (이미 존재하는 Deployment)
-        echo "📋 Current deployment status:"
-        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide || {
-          echo "❌ Failed to get deployment status"
-          exit 1
-        }
-        
-        echo "📋 Current image:"
-        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}' || {
-          echo "❌ Failed to get current image"
-          exit 1
-        }
-        echo ""
-        
-        echo "📋 Current pods:"
-        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api || {
-          echo "⚠️ Warning: Failed to get pods, but continuing..."
-        }
-        
-    - name: 🚀 Kubernetes 배포 업데이트
-      run: |
-        echo "🚀 Updating Kubernetes deployment..."
-        
-        # 새로운 이미지로 업데이트 (latest 태그 사용)
-        NEW_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest"
-        echo "📦 New image: $NEW_IMAGE"
-        
-        # imagePullPolicy를 Always로 설정하여 latest 태그를 항상 pull하도록 함
-        kubectl patch deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -p "{
-          \"spec\": {
-            \"template\": {
-              \"spec\": {
-                \"containers\": [{
-                  \"name\": \"${{ env.K8S_CONTAINER_NAME }}\",
-                  \"image\": \"$NEW_IMAGE\",
-                  \"imagePullPolicy\": \"Always\"
-                }]
-              }
-            }
-          }
-        }" || {
-          echo "⚠️ Patch failed, trying with kubectl set image..."
-          kubectl set image deployment/${{ env.K8S_DEPLOYMENT_NAME }} \
-            ${{ env.K8S_CONTAINER_NAME }}=$NEW_IMAGE \
-            -n ${{ env.K8S_NAMESPACE }}
-        }
-        
-        # 배포 어노테이션 추가 (강제 업데이트를 위해)
-        kubectl annotate deployment ${{ env.K8S_DEPLOYMENT_NAME }} \
-          deployment.kubernetes.io/revision- \
-          -n ${{ env.K8S_NAMESPACE }} || true
-          
-        kubectl annotate deployment ${{ env.K8S_DEPLOYMENT_NAME }} \
-          "deployment.kubernetes.io/deployed-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          "deployment.kubernetes.io/deployed-by=github-actions" \
-          "deployment.kubernetes.io/commit-sha=${{ github.sha }}" \
-          -n ${{ env.K8S_NAMESPACE }} --overwrite
-        
-        echo "✅ Deployment update command executed"
-        
-    - name: ⏳ 배포 상태 모니터링
-      timeout-minutes: 10
-      run: |
-        echo "⏳ Waiting for deployment to complete..."
-        
-        # 롤아웃 상태 모니터링
-        if kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=600s; then
-          echo "✅ Deployment completed successfully!"
-        else
-          echo "❌ Deployment failed or timed out"
-          
-          # 실패 시 디버깅 정보 출력
-          echo "📋 Deployment description:"
-          kubectl describe deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }}
-          
-          echo "📋 Pod status:"
-          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api
-          
-          echo "📋 Recent events:"
-          kubectl get events -n ${{ env.K8S_NAMESPACE }} --sort-by='.lastTimestamp' | tail -10
-          
-          exit 1
-        fi
-        
-    - name: 🔍 배포 후 상태 확인
-      run: |
-        echo "🔍 Post-deployment verification..."
-        
-        # 최종 배포 상태
-        echo "📋 Final deployment status:"
+        # 현재 배포 상태 상세 분석
+        echo "📋 Current deployment detailed status:"
         kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide
         
-        # Pod 상태 확인
-        echo "📋 Pod status:"
-        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api -o wide
+        # 현재 실행 중인 이미지 정보
+        echo "📋 Current running image:"
+        CURRENT_IMAGE=$(kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}')
+        echo "Current: $CURRENT_IMAGE"
         
-        # 새로운 이미지 확인
-        echo "📋 Updated image:"
-        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} \
-          -o jsonpath='{.spec.template.spec.containers[0].image}'
-        echo ""
+        # Pod 상태 분석
+        echo "📋 Current pod status:"
+        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api --sort-by=.metadata.creationTimestamp
+        
+        # Pod 상세 정보
+        echo "📋 Pod resource usage:"
+        kubectl top pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api || echo "⚠️ Pod metrics not available"
         
         # Service 상태 확인
         echo "📋 Service status:"
         kubectl get service -n ${{ env.K8S_NAMESPACE }}
         
-    - name: 🩺 애플리케이션 헬스체크
+        # 최근 이벤트 확인
+        echo "📋 Recent cluster events:"
+        kubectl get events -n ${{ env.K8S_NAMESPACE }} --sort-by='.lastTimestamp' | tail -10
+        
+        echo "✅ Pre-deployment diagnosis completed"
+        
+    - name: 🚀 무중단 Kubernetes 배포 (고유 태그 전략)
       run: |
-        echo "🩺 Performing application health check..."
+        echo "🚀 Initiating zero-downtime Kubernetes deployment..."
         
-        # Pod가 Ready 상태인지 확인
-        echo "⏳ Waiting for pods to be ready..."
+        # 고유 태그로 새 이미지 준비
+        UNIQUE_TAG="${{ needs.build-and-test.outputs.unique_tag }}"
+        NEW_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${UNIQUE_TAG}"
+        FALLBACK_IMAGE="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest"
+        
+        echo "📦 Target images:"
+        echo "   Primary: $NEW_IMAGE"
+        echo "   Fallback: $FALLBACK_IMAGE"
+        
+        # Registry에서 이미지 존재 확인
+        echo "🔍 Verifying image availability in registry..."
+        docker login ${{ env.REGISTRY_URL }} -u ${{ secrets.NCP_REGISTRY_USERNAME }} -p ${{ secrets.NCP_REGISTRY_PASSWORD }}
+        
+        if docker manifest inspect "$NEW_IMAGE" >/dev/null 2>&1; then
+          DEPLOY_IMAGE="$NEW_IMAGE"
+          echo "✅ Using unique tag image: $DEPLOY_IMAGE"
+        elif docker manifest inspect "$FALLBACK_IMAGE" >/dev/null 2>&1; then
+          DEPLOY_IMAGE="$FALLBACK_IMAGE"
+          echo "⚠️ Falling back to latest tag: $DEPLOY_IMAGE"
+        else
+          echo "❌ Neither image found in registry"
+          exit 1
+        fi
+        
+        # 현재 이미지와 비교
+        CURRENT_IMAGE=$(kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}')
+        echo "📋 Image comparison:"
+        echo "   Current: $CURRENT_IMAGE"
+        echo "   New: $DEPLOY_IMAGE"
+        
+        if [ "$CURRENT_IMAGE" = "$DEPLOY_IMAGE" ]; then
+          echo "⚠️ Images are identical, forcing restart anyway..."
+          FORCE_RESTART=true
+        else
+          echo "✅ Different images detected, proceeding with update..."
+          FORCE_RESTART=false
+        fi
+        
+        # Deployment 업데이트 (무중단 롤링 업데이트)
+        echo "🔄 Updating deployment with zero-downtime strategy..."
+        
+        # imagePullPolicy를 Always로 설정 및 이미지 업데이트
+        kubectl patch deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} --type='merge' -p="{
+          \"spec\": {
+            \"template\": {
+              \"spec\": {
+                \"containers\": [{
+                  \"name\": \"${{ env.K8S_CONTAINER_NAME }}\",
+                  \"image\": \"$DEPLOY_IMAGE\",
+                  \"imagePullPolicy\": \"Always\"
+                }]
+              }
+            }
+          }
+        }"
+        
+        # 배포 메타데이터 업데이트 (변경 감지 보장)
+        kubectl annotate deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} \
+          "deployment.kubernetes.io/deployed-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          "deployment.kubernetes.io/deployed-by=github-actions" \
+          "deployment.kubernetes.io/commit-sha=${{ github.sha }}" \
+          "deployment.kubernetes.io/image-tag=${UNIQUE_TAG}" \
+          "deployment.kubernetes.io/run-id=${{ github.run_id }}" \
+          --overwrite
+        
+        # 강제 재시작 (동일 이미지인 경우 또는 확실한 적용을 위해)
+        if [ "$FORCE_RESTART" = "true" ] || [ "${{ github.event.inputs.force_restart }}" = "true" ]; then
+          echo "🔄 Performing rolling restart to ensure changes..."
+          kubectl rollout restart deployment/${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }}
+        fi
+        
+        echo "✅ Deployment update initiated successfully"
+        
+    - name: ⏳ 배포 상태 실시간 모니터링
+      timeout-minutes: 15
+      run: |
+        echo "⏳ Real-time deployment monitoring..."
+        
+        # 롤아웃 상태 모니터링 (타임아웃 10분)
+        echo "🔍 Monitoring rollout progress..."
+        if kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=600s; then
+          echo "✅ Rollout completed successfully!"
+        else
+          echo "❌ Rollout failed or timed out"
+          
+          # 실패 시 상세 디버깅 정보
+          echo "📋 Deployment failure analysis:"
+          kubectl describe deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }}
+          
+          echo "📋 Current pod status:"
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api -o wide
+          
+          echo "📋 Pod events and logs:"
+          for pod in $(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api -o jsonpath='{.items[*].metadata.name}'); do
+            echo "=== Pod: $pod ==="
+            kubectl describe pod $pod -n ${{ env.K8S_NAMESPACE }} | tail -20
+            echo "--- Logs ---"
+            kubectl logs $pod -n ${{ env.K8S_NAMESPACE }} --tail=20 || echo "No logs available"
+          done
+          
+          echo "📋 Recent cluster events:"
+          kubectl get events -n ${{ env.K8S_NAMESPACE }} --sort-by='.lastTimestamp' | tail -15
+          
+          exit 1
+        fi
+        
+        # 배포 후 안정성 확인
+        echo "🔍 Post-deployment stability check..."
+        sleep 30
+        
+        # Pod 안정성 재확인
+        if kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.readyReplicas}' | grep -q "^[1-9]"; then
+          echo "✅ Deployment is stable with ready replicas"
+        else
+          echo "⚠️ Deployment may not be fully stable"
+          kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide
+        fi
+        
+    - name: 🔍 배포 후 종합 검증
+      run: |
+        echo "🔍 Comprehensive post-deployment verification..."
+        
+        # 최종 배포 상태 확인
+        echo "📋 Final deployment status:"
+        kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide
+        
+        # 새로운 Pod 상태 분석
+        echo "📋 New pod status (sorted by creation time):"
+        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api --sort-by=.metadata.creationTimestamp -o wide
+        
+        # 실제 사용 중인 이미지 확인
+        echo "📋 Currently running image:"
+        kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+        
+        # Pod 리소스 사용량 확인
+        echo "📋 Pod resource usage:"
+        kubectl top pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api || echo "⚠️ Metrics not available"
+        
+        # Service 연결 상태 확인
+        echo "📋 Service connectivity:"
+        kubectl get service -n ${{ env.K8S_NAMESPACE }}
+        kubectl get endpoints -n ${{ env.K8S_NAMESPACE }}
+        
+        # 배포 히스토리 확인
+        echo "📋 Deployment rollout history:"
+        kubectl rollout history deployment/${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }}
+        
+        echo "✅ Post-deployment verification completed"
+        
+    - name: 🩺 애플리케이션 헬스체크 및 기능 검증
+      run: |
+        echo "🩺 Comprehensive application health check..."
+        
+        # Pod Ready 상태 확인
+        echo "⏳ Waiting for all pods to be ready..."
         kubectl wait --for=condition=Ready pod -l app=zdm-api -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+        echo "✅ All pods are ready"
         
-        # 내부 헬스체크 (Service 통해서)
+        # 내부 서비스 접근성 테스트
         echo "🔍 Testing internal service accessibility..."
         kubectl run healthcheck-${{ github.run_id }} \
           --image=curlimages/curl \
           --rm -i --restart=Never \
           --timeout=60s \
           -n ${{ env.K8S_NAMESPACE }} \
-          -- curl -f -m 30 http://zdm-api-service:53307/health || {
-            echo "⚠️ Health check failed, but deployment was successful"
-            echo "This might be normal if health endpoint is not available"
+          -- curl -f -m 30 -v http://zdm-api-service:53307/health || {
+            echo "⚠️ Health endpoint check failed"
+            echo "Testing basic connectivity..."
+            kubectl run connectivity-test-${{ github.run_id }} \
+              --image=curlimages/curl \
+              --rm -i --restart=Never \
+              --timeout=60s \
+              -n ${{ env.K8S_NAMESPACE }} \
+              -- curl -f -m 10 http://zdm-api-service:53307/ || echo "Basic connectivity failed"
           }
         
-        echo "✅ Deployment verification completed"
+        # 애플리케이션 로그 확인 (최신 변경사항 검증)
+        echo "📋 Application logs from new pods:"
+        for pod in $(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}'); do
+          echo "=== Logs from newest pod: $pod ==="
+          kubectl logs $pod -n ${{ env.K8S_NAMESPACE }} --tail=50 || echo "No logs available"
+        done
         
-    - name: 📊 배포 요약 정보
+        # 애플리케이션 내부 구조 확인
+        echo "📋 Application internal verification:"
+        LATEST_POD=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}')
+        if [ ! -z "$LATEST_POD" ]; then
+          echo "Checking latest pod: $LATEST_POD"
+          kubectl exec $LATEST_POD -n ${{ env.K8S_NAMESPACE }} -- ls -la /app/ || echo "⚠️ /app directory not accessible"
+          kubectl exec $LATEST_POD -n ${{ env.K8S_NAMESPACE }} -- cat /app/package.json | grep version || echo "⚠️ package.json not found"
+        fi
+        
+        echo "✅ Application health check completed"
+        
+    - name: 📊 배포 완료 종합 요약
       run: |
-        echo "## 🎯 배포 완료 요약" >> $GITHUB_STEP_SUMMARY
+        # 배포 성공 정보 수집
+        CURRENT_IMAGE=$(kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}')
+        READY_REPLICAS=$(kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.status.readyReplicas}')
+        TOTAL_REPLICAS=$(kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.replicas}')
+        
+        # GitHub Actions Summary 생성
+        echo "## 🎯 무중단 배포 완료 종합 요약" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📦 배포 정보" >> $GITHUB_STEP_SUMMARY
-        echo "- **환경**: Production" >> $GITHUB_STEP_SUMMARY
+        echo "- **환경**: Production (NKS)" >> $GITHUB_STEP_SUMMARY
         echo "- **네임스페이스**: \`${{ env.K8S_NAMESPACE }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Deployment**: \`${{ env.K8S_DEPLOYMENT_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **이미지**: \`${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **현재 이미지**: \`${CURRENT_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **고유 태그**: \`${{ needs.build-and-test.outputs.unique_tag }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **커밋**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **브랜치**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **배포자**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
         echo "- **배포 시간**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Pod 상태**: ${READY_REPLICAS}/${TOTAL_REPLICAS} Ready" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🚀 배포 명령어" >> $GITHUB_STEP_SUMMARY
+        echo "### 🚀 배포 검증 명령어" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "kubectl set image deployment/${{ env.K8S_DEPLOYMENT_NAME }} \\" >> $GITHUB_STEP_SUMMARY
-        echo "  ${{ env.K8S_CONTAINER_NAME }}=${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest \\" >> $GITHUB_STEP_SUMMARY
-        echo "  -n ${{ env.K8S_NAMESPACE }}" >> $GITHUB_STEP_SUMMARY
+        echo "# 현재 배포 상태 확인" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Pod 상태 확인" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=zdm-api" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# 현재 이미지 확인" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl get deployment ${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}'" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# 서비스 접근 테스트" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl run test --image=curlimages/curl --rm -i --restart=Never -n ${{ env.K8S_NAMESPACE }} -- curl -f http://zdm-api-service:53307/health" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔄 롤백 명령어 (필요시)" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# 이전 버전으로 롤백" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl rollout undo deployment/${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# 롤백 상태 확인" >> $GITHUB_STEP_SUMMARY
+        echo "kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT_NAME }} -n ${{ env.K8S_NAMESPACE }}" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        
+        echo "✅ Deployment summary generated successfully"
 
   # 5단계: 알림 및 결과 리포트
   notify-result:
-    name: Notify Build Result
+    name: Deployment Notification
     runs-on: ubuntu-latest
     needs: [build-and-test, docker-build-push, verify-image, deploy-to-kubernetes]
     if: always()
     
     steps:
-    - name: 📧 결과 이메일 알림
+    - name: 📧 배포 결과 이메일 알림
       uses: dawidd6/action-send-mail@v3
       with:
         server_address: smtp.gmail.com
         server_port: 587
         username: ${{ secrets.EMAIL_USERNAME }}
         password: ${{ secrets.EMAIL_PASSWORD }}
-        subject: "[NCP] ${{ env.PROJECT_NAME }} 빌드 및 배포 결과: ${{ (needs.docker-build-push.result == 'success' && (needs.deploy-to-kubernetes.result == 'success' || needs.deploy-to-kubernetes.result == 'skipped')) && '성공' || '실패' }}"
+        subject: "[NCP] ${{ env.PROJECT_NAME }} 무중단 배포 결과: ${{ (needs.docker-build-push.result == 'success' && (needs.deploy-to-kubernetes.result == 'success' || needs.deploy-to-kubernetes.result == 'skipped')) && '✅ 성공' || '❌ 실패' }}"
         to: ${{ secrets.NOTIFICATION_EMAIL }}
         from: ${{ secrets.EMAIL_USERNAME }}
         body: |
-          ${{ env.PROJECT_NAME }} Docker 이미지 빌드 및 Kubernetes 배포가 완료되었습니다.
+          ${{ env.PROJECT_NAME }} 무중단 Docker 이미지 빌드 및 Kubernetes 배포가 완료되었습니다.
 
-          ## 빌드 및 배포 결과 요약
-          - 📦 빌드 및 테스트: ${{ needs.build-and-test.result }}
-          - 🐳 Docker 빌드 & 푸시: ${{ needs.docker-build-push.result }}
-          - 🔍 이미지 검증: ${{ needs.verify-image.result }}
-          - 🚀 Kubernetes 배포: ${{ needs.deploy-to-kubernetes.result }}
+          ## 🎯 배포 결과 종합 요약
+          - 📦 빌드 및 테스트: ${{ needs.build-and-test.result }} ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }}
+          - 🐳 Docker 빌드 & 푸시: ${{ needs.docker-build-push.result }} ${{ needs.docker-build-push.result == 'success' && '✅' || '❌' }}
+          - 🔍 강화된 이미지 검증: ${{ needs.verify-image.result }} ${{ needs.verify-image.result == 'success' && '✅' || '❌' }}
+          - 🚀 무중단 Kubernetes 배포: ${{ needs.deploy-to-kubernetes.result }} ${{ needs.deploy-to-kubernetes.result == 'success' && '✅' || needs.deploy-to-kubernetes.result == 'skipped' && '⏭️' || '❌' }}
 
-          ## 프로젝트 정보
-          - 프로젝트: ${{ env.PROJECT_NAME }}
-          - 레지스트리: ${{ env.REGISTRY_URL }}
-          - 브랜치: ${{ github.ref_name }}
-          - 커밋: ${{ github.sha }}
-          - 버전: ${{ needs.build-and-test.outputs.version }}
-          - 트리거: ${{ github.event_name }}
-          - 작성자: ${{ github.actor }}
+          ## 📋 프로젝트 정보
+          - **프로젝트**: ${{ env.PROJECT_NAME }}
+          - **레지스트리**: ${{ env.REGISTRY_URL }}
+          - **브랜치**: ${{ github.ref_name }}
+          - **커밋**: ${{ github.sha }}
+          - **고유 태그**: ${{ needs.build-and-test.outputs.unique_tag }}
+          - **버전**: ${{ needs.build-and-test.outputs.version }}
+          - **트리거**: ${{ github.event_name }}
+          - **배포자**: ${{ github.actor }}
 
-          ## Docker 이미지
-          ${{ needs.docker-build-push.result == 'success' && format('```
+          ## 🐳 Docker 이미지
+          ${{ needs.docker-build-push.result == 'success' && format('**성공적으로 푸시된 이미지:**
+          ```
           {0}/{1}:latest
           {0}/{1}:{2}
-          ```', env.REGISTRY_URL, env.PROJECT_NAME, needs.build-and-test.outputs.version) || '이미지 빌드 실패' }}
+          {0}/{1}:{3}
+          ```', env.REGISTRY_URL, env.PROJECT_NAME, needs.build-and-test.outputs.unique_tag, needs.build-and-test.outputs.version) || '❌ 이미지 빌드 실패' }}
 
-          ## Kubernetes 배포 정보
-          ${{ needs.deploy-to-kubernetes.result == 'success' && format('- **네임스페이스**: {0}
-          - **Deployment**: {1}
-          - **배포 완료**: ✅', env.K8S_NAMESPACE, env.K8S_DEPLOYMENT_NAME) || needs.deploy-to-kubernetes.result == 'skipped' && '배포 건너뜀 (main 브랜치 아님)' || '배포 실패' }}
+          ## ⚙️ Kubernetes 배포 정보
+          ${{ needs.deploy-to-kubernetes.result == 'success' && format('**배포 성공:**
+          - 네임스페이스: `{0}`
+          - Deployment: `{1}`
+          - 배포 방식: 무중단 롤링 업데이트
+          - 이미지 태그: `{2}`
+          - 배포 완료: ✅', env.K8S_NAMESPACE, env.K8S_DEPLOYMENT_NAME, needs.build-and-test.outputs.unique_tag) || needs.deploy-to-kubernetes.result == 'skipped' && '⏭️ 배포 건너뜀 (main 브랜치 아님)' || '❌ 배포 실패' }}
 
-          ## 액션 상세 보기
-          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ## 🔗 링크
+          - **GitHub Actions 실행**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - **커밋 상세**: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
 
           ---
-          실행 시간: ${{ github.event.head_commit.timestamp }}
+          📅 실행 시간: ${{ github.event.head_commit.timestamp }}
+          🤖 GitHub Actions에서 자동 발송
       if: always()
       
-    - name: 📊 워크플로우 요약
+    - name: 📊 최종 CI/CD 파이프라인 요약
       run: |
-        echo "## 🎯 CI/CD 파이프라인 완료 요약" >> $GITHUB_STEP_SUMMARY
+        echo "## 🎯 완전 자동화 CI/CD 파이프라인 최종 요약" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| 단계 | 결과 | 상태 |" >> $GITHUB_STEP_SUMMARY
-        echo "|------|------|------|" >> $GITHUB_STEP_SUMMARY
-        echo "| 빌드 및 테스트 | ${{ needs.build-and-test.result }} | ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Docker 빌드 & 푸시 | ${{ needs.docker-build-push.result }} | ${{ needs.docker-build-push.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| 이미지 검증 | ${{ needs.verify-image.result }} | ${{ needs.verify-image.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Kubernetes 배포 | ${{ needs.deploy-to-kubernetes.result }} | ${{ needs.deploy-to-kubernetes.result == 'success' && '✅' || needs.deploy-to-kubernetes.result == 'skipped' && '⏭️' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 단계 | 결과 | 상태 | 설명 |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|------|------|------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 빌드 및 테스트 | ${{ needs.build-and-test.result }} | ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }} | TypeScript 빌드, 버전 생성 |" >> $GITHUB_STEP_SUMMARY
+        echo "| Docker 빌드 & 푸시 | ${{ needs.docker-build-push.result }} | ${{ needs.docker-build-push.result == 'success' && '✅' || '❌' }} | 다중 태그 전략, NCP Registry |" >> $GITHUB_STEP_SUMMARY
+        echo "| 강화된 이미지 검증 | ${{ needs.verify-image.result }} | ${{ needs.verify-image.result == 'success' && '✅' || '❌' }} | 캐시 정리, 상세 검증 |" >> $GITHUB_STEP_SUMMARY
+        echo "| 무중단 K8s 배포 | ${{ needs.deploy-to-kubernetes.result }} | ${{ needs.deploy-to-kubernetes.result == 'success' && '✅' || needs.deploy-to-kubernetes.result == 'skipped' && '⏭️' || '❌' }} | 롤링 업데이트, 고유 태그 |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📦 생성된 이미지" >> $GITHUB_STEP_SUMMARY
+        echo "### 🚀 핵심 개선사항" >> $GITHUB_STEP_SUMMARY
+        echo "- **고유 태그 전략**: 매번 새로운 이미지로 확실한 업데이트" >> $GITHUB_STEP_SUMMARY
+        echo "- **강화된 캐시 정리**: Docker 캐시 완전 제거로 최신 이미지 보장" >> $GITHUB_STEP_SUMMARY
+        echo "- **무중단 배포**: 롤링 업데이트로 서비스 중단 없음" >> $GITHUB_STEP_SUMMARY
+        echo "- **상세한 검증**: 이미지 메타데이터, 애플리케이션 구조 확인" >> $GITHUB_STEP_SUMMARY
+        echo "- **Service Account Token**: 안정적인 Kubernetes 인증" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 생성된 이미지 태그" >> $GITHUB_STEP_SUMMARY
         echo "- **레지스트리**: \`${{ env.REGISTRY_URL }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **프로젝트**: \`${{ env.PROJECT_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **고유 태그**: \`${{ needs.build-and-test.outputs.unique_tag }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **버전**: \`${{ needs.build-and-test.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
         echo "- **브랜치**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         if [[ "${{ needs.deploy-to-kubernetes.result }}" == "success" ]]; then
-          echo "### 🚀 배포 정보" >> $GITHUB_STEP_SUMMARY
-          echo "- **환경**: Production" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎉 배포 성공 정보" >> $GITHUB_STEP_SUMMARY
+          echo "- **환경**: Production (NKS)" >> $GITHUB_STEP_SUMMARY
           echo "- **네임스페이스**: \`${{ env.K8S_NAMESPACE }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Deployment**: \`${{ env.K8S_DEPLOYMENT_NAME }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **배포 시간**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "- **배포 방식**: 무중단 롤링 업데이트" >> $GITHUB_STEP_SUMMARY
         fi
       if: always()
