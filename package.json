@@ -1,7 +1,7 @@
 {
-  "name": "simple-typescript-server",
+  "name": "simple-zdm-api-server",
   "version": "1.0.0",
-  "description": "Simple TypeScript server",
+  "description": "Simple ZDM Api server",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",

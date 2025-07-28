@@ -1,5 +1,4 @@
-# .github/workflows/ci-cd.yml
-name: Simple CI/CD Pipeline
+name: Build and Deploy to NKS
 
 on:
   push:
@@ -7,155 +6,53 @@ on:
   pull_request:
     branches: [ main ]
 
-# GitHub Actions 권한 설정
-permissions:
-  contents: read
-  packages: write
-  security-events: write
-
 env:
-  NODE_VERSION: '20'
-  REGISTRY: ghcr.io
-  IMAGE_NAME: action-test-image
-
+  PROJECT_NAME: zdm-api-server
+  NKS_REGISTRY: your-nks-registry.ncloud.com
+  NKS_NAMESPACE: your-namespace
+  
 jobs:
-  # 1단계: 테스트 실행 (의존성 없이)
-  test:
-    name: 테스트 실행
+  # 1단계: 빌드 및 테스트
+  build-and-test:
+    name: Build and Test
     runs-on: ubuntu-latest
     
     steps:
     - name: 코드 체크아웃
       uses: actions/checkout@v4
       
-    - name: Node.js 20 설정
+    - name: Node.js 22 설정
       uses: actions/setup-node@v4
       with:
-        node-version: ${{ env.NODE_VERSION }}
+        node-version: '22'
         cache: 'npm'
         
-    - name: package.json 확인
-      run: |
-        echo "Package.json 내용:"
-        cat package.json
-        echo "Node.js 버전:"
-        node --version
-        echo "npm 버전:"
-        npm --version
-        
-    - name: 의존성 설치 (있는 경우에만)
-      run: |
-        if [ -f package-lock.json ] && [ $(wc -l < package-lock.json) -gt 10 ]; then
-          echo "package-lock.json이 존재하고 의존성이 있습니다."
-          npm ci
-        else
-          echo "의존성이 없거나 package-lock.json이 비어있습니다. npm install 실행..."
-          npm install
-        fi
-      
-    - name: 린트 검사
-      run: npm run lint
-      
-    - name: 테스트 실행
-      run: npm run test
-      
-    - name: 애플리케이션 파일 확인
-      run: |
-        echo "현재 디렉토리 파일들:"
-        ls -la
-        if [ -f "puppeteer.js" ]; then
-          echo "puppeteer.js 파일 존재 확인"
-          head -10 puppeteer.js
-        fi
-
-  # 2단계: 보안 검사 (기본적인 검사만)
-  security:
-    name: 보안 검사
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: 코드 체크아웃
-      uses: actions/checkout@v4
-      
-    - name: Node.js 20 설정
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ env.NODE_VERSION }}
-        
-    - name: 기본 보안 검사
-      run: |
-        echo "기본 보안 검사 실행 중..."
-        
-        # package.json에서 알려진 취약한 패키지 확인
-        if grep -q "node_modules" .gitignore 2>/dev/null; then
-          echo "node_modules가 .gitignore에 포함되어 있습니다. (좋음)"
-        else
-          echo "⚠️ .gitignore 파일이 없거나 node_modules가 포함되지 않았습니다."
-        fi
-        
-        # 민감한 정보 확인
-        if find . -name "*.js" -exec grep -l "password\|secret\|key" {} \; | grep -v node_modules; then
-          echo "⚠️ 코드에서 잠재적인 민감한 정보를 발견했습니다."
-        else
-          echo "민감한 정보 검사 통과"
-        fi
-        
-        echo "기본 보안 검사 완료"
-
-  # 3단계: 빌드 및 아티팩트 생성
-  build:
-    name: 빌드 및 아티팩트
-    runs-on: ubuntu-latest
-    needs: [test, security]
-    
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    
-    steps:
-    - name: 코드 체크아웃
-      uses: actions/checkout@v4
-      
-    - name: Node.js 20 설정
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ env.NODE_VERSION }}
-        
     - name: 의존성 설치
-      run: |
-        if [ -f package-lock.json ] && [ $(wc -l < package-lock.json) -gt 10 ]; then
-          npm ci
-        else
-          npm install
-        fi
+      run: npm ci
       
-    - name: 애플리케이션 빌드
+    - name: TypeScript 빌드 테스트
       run: npm run build
       
-    - name: 버전 정보 생성
-      id: version
-      run: |
-        VERSION=${GITHUB_SHA::7}
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "VERSION=$VERSION" > version.txt
-        echo "Build version: $VERSION"
-        
     - name: 빌드 아티팩트 업로드
       uses: actions/upload-artifact@v4
       with:
-        name: build-${{ steps.version.outputs.version }}
+        name: build-files
         path: |
+          dist/
           package.json
-          puppeteer.js
-          README.md
-          version.txt
-        retention-days: 30
+          package-lock.json
+        retention-days: 1
 
-  # 4단계: Docker 이미지 빌드
+  # 2단계: Docker 이미지 빌드 및 푸시
   docker-build:
-    name: Docker 이미지 빌드
+    name: Docker Build and Push
     runs-on: ubuntu-latest
-    needs: build
+    needs: build-and-test
     if: github.event_name == 'push'
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
     
     steps:
     - name: 코드 체크아웃
@@ -164,24 +61,25 @@ jobs:
     - name: Docker Buildx 설정
       uses: docker/setup-buildx-action@v3
       
-    - name: GitHub Container Registry 로그인
+    - name: NKS Container Registry 로그인
       uses: docker/login-action@v3
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: ${{ env.NKS_REGISTRY }}
+        username: ${{ secrets.NKS_REGISTRY_USERNAME }}
+        password: ${{ secrets.NKS_REGISTRY_PASSWORD }}
         
     - name: 메타데이터 추출
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+        images: ${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}
         tags: |
           type=ref,event=branch
           type=sha,prefix={{branch}}-
           type=raw,value=latest,enable={{is_default_branch}}
           
     - name: Docker 이미지 빌드 및 푸시
+      id: build
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -190,96 +88,103 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
-  
-  # 5단계: 릴리스 노트 생성
-  create-release:
-    name: 릴리스 생성
+        platforms: linux/amd64
+        
+    - name: 이미지 스캔 (Trivy)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}:latest
+        format: 'table'
+        exit-code: '0'
+
+  # 3단계: NKS 배포
+  deploy-to-nks:
+    name: Deploy to NKS
     runs-on: ubuntu-latest
-    needs: [build, docker-build]
+    needs: docker-build
     if: github.ref == 'refs/heads/main'
+    environment: 
+      name: production
+      url: https://your-domain.com
     
     steps:
     - name: 코드 체크아웃
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      
+    - name: NKS kubectl 설정
+      run: |
+        # NKS 클러스터 설정
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.NKS_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+        chmod 600 $HOME/.kube/config
         
-    - name: 릴리스 태그 생성
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: v${{ needs.build.outputs.version }}
-        release_name: Release v${{ needs.build.outputs.version }}
-        body: |
-          ## 변경 사항
-          
-          ### 새로운 기능
-          - CI/CD 파이프라인 구성
-          - Docker 이미지 빌드 및 배포
-          
-          ### 기술적 개선사항
-          - Node.js 20 버전 사용
-          - GitHub Actions 워크플로우 추가
-          
-          ### Docker 이미지
-          ```
-          docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:v${{ needs.build.outputs.version }}
-          ```
-          
-          **빌드 정보:**
-          - 커밋: ${{ github.sha }}
-          - 빌드 시간: ${{ github.event.head_commit.timestamp }}
-        draft: false
-        prerelease: false
+    - name: kubectl 연결 테스트
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+        
+    - name: 배포 매니페스트 업데이트
+      run: |
+        # 이미지 태그 업데이트
+        sed -i "s|your-nks-registry.ncloud.com/your-namespace/zdm-api-server:latest|${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}:main-${{ github.sha }}|g" k8s/deployment.yaml
+        
+    - name: NKS에 배포
+      run: |
+        kubectl apply -f k8s/deployment.yaml
+        
+    - name: 배포 상태 확인
+      run: |
+        kubectl rollout status deployment/zdm-api-server -n default --timeout=300s
+        kubectl get pods -l app=zdm-api-server -n default
+        
+    - name: 서비스 상태 확인
+      run: |
+        kubectl get service zdm-api-server-service -n default
+        kubectl get ingress zdm-api-server-ingress -n default
+        
+    - name: 헬스체크
+      run: |
+        # 서비스가 정상적으로 응답하는지 확인
+        sleep 30
+        kubectl port-forward service/zdm-api-server-service 8080:80 -n default &
+        sleep 10
+        curl -f http://localhost:8080/ || exit 1
+        echo "✅ Health check passed!"
 
-  # 6단계: 결과 이메일 전송
-  notify-result:
-    name: 결과 이메일 알림
+  # 4단계: 배포 후 알림
+  notify-deployment:
+    name: Deployment Notification
     runs-on: ubuntu-latest
-    needs:
-      - test
-      - security  
-      - build
-      - docker-build
-      - create-release
+    needs: [build-and-test, docker-build, deploy-to-nks]
     if: always()
     
     steps:
-    - name: 최종 결과 이메일 발송
+    - name: 배포 결과 이메일 알림
       uses: dawidd6/action-send-mail@v3
       with:
         server_address: smtp.gmail.com
         server_port: 587
         username: ${{ secrets.EMAIL_USERNAME }}
         password: ${{ secrets.EMAIL_PASSWORD }}
-        subject: "[CI/CD] Action Test 프로젝트 빌드 결과: ${{ contains(needs.*.result, 'failure') && '실패' || '성공' }}"
+        subject: "[NKS] TypeScript Server 배포 결과: ${{ job.status == 'success' && '성공' || '실패' }}"
         to: ${{ secrets.NOTIFICATION_EMAIL }}
         from: ${{ secrets.EMAIL_USERNAME }}
         body: |
-          Action Test CI/CD 파이프라인이 완료되었습니다.
+          NKS TypeScript Server 배포가 완료되었습니다.
 
-          ## 빌드 결과 요약
-          - 테스트 실행: ${{ needs.test.result }}
-          - 보안 검사: ${{ needs.security.result }}
-          - 빌드 및 아티팩트: ${{ needs.build.result }}
-          - Docker 이미지 빌드: ${{ needs.docker-build.result }}
-          - 릴리스 생성: ${{ needs.create-release.result }}
+          ## 배포 결과
+          - 빌드 상태: ${{ needs.build-and-test.result }}
+          - Docker 빌드: ${{ needs.docker-build.result }}
+          - NKS 배포: ${{ needs.deploy-to-nks.result }}
 
-          ## 프로젝트 정보
-          - 레포지토리: ${{ github.repository }}
+          ## 배포 정보
+          - 프로젝트: ${{ env.PROJECT_NAME }}
           - 브랜치: ${{ github.ref_name }}
           - 커밋: ${{ github.sha }}
-          - 작성자: ${{ github.actor }}
-          - 빌드 시간: ${{ github.event.head_commit.timestamp }}
+          - 이미지: ${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}:main-${{ github.sha }}
 
-          ## Docker 이미지
-          ${{ needs.docker-build.result == 'success' && format('```\ndocker pull {0}/{1}/{2}:latest\n```', env.REGISTRY, github.repository_owner, env.IMAGE_NAME) || '이미지 빌드 실패' }}
+          ## 링크
+          - 액션: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - 서비스: https://your-domain.com
 
-          ## 액션 상세 보기
-          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-          ## 릴리스 정보
-          ${{ needs.create-release.result == 'success' && format('릴리스 v{0}이 생성되었습니다.', needs.build.outputs.version) || '릴리스 생성 실패 또는 스킵' }}
       if: always()
