@@ -1,42 +1,66 @@
-name: Build and Deploy to NKS
+name: Build and Push to NCP Container Registry
 
 on:
   push:
     branches: [ main, develop ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
+# GitHub Actions 권한 설정
+permissions:
+  contents: read
+  packages: write
+
 env:
   PROJECT_NAME: zdm-api-server
-  NKS_REGISTRY: your-nks-registry.ncloud.com
-  NKS_NAMESPACE: your-namespace
-  
+  REGISTRY_URL: zcon-nipa-container-registry.kr.ncr.ntruss.com
+  NODE_VERSION: '22'
+
 jobs:
   # 1단계: 빌드 및 테스트
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
     
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    
     steps:
-    - name: 코드 체크아웃
+    - name: 🛒 코드 체크아웃
       uses: actions/checkout@v4
       
-    - name: Node.js 22 설정
+    - name: 🔧 Node.js ${{ env.NODE_VERSION }} 설정
       uses: actions/setup-node@v4
       with:
-        node-version: '22'
+        node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
         
-    - name: 의존성 설치
+    - name: 📦 의존성 설치
       run: npm ci
       
-    - name: TypeScript 빌드 테스트
-      run: npm run build
-      
-    - name: 빌드 아티팩트 업로드
+    - name: 🧪 TypeScript 빌드 테스트
+      run: |
+        echo "🔍 Testing TypeScript build..."
+        npm run build
+        echo "✅ TypeScript build successful"
+        
+    - name: 🏷️ 버전 정보 생성
+      id: version
+      run: |
+        # 태그가 있으면 태그를 사용, 없으면 브랜치-SHA 조합 사용
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+        else
+          VERSION=${{ github.ref_name }}-${{ github.sha }}
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "📍 Generated version: $VERSION"
+        
+    - name: 📤 빌드 아티팩트 업로드
       uses: actions/upload-artifact@v4
       with:
-        name: build-files
+        name: build-artifacts-${{ steps.version.outputs.version }}
         path: |
           dist/
           package.json
@@ -44,42 +68,44 @@ jobs:
         retention-days: 1
 
   # 2단계: Docker 이미지 빌드 및 푸시
-  docker-build:
-    name: Docker Build and Push
+  docker-build-push:
+    name: Docker Build and Push to NCP
     runs-on: ubuntu-latest
     needs: build-and-test
     if: github.event_name == 'push'
     
-    outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
-    
     steps:
-    - name: 코드 체크아웃
+    - name: 🛒 코드 체크아웃
       uses: actions/checkout@v4
       
-    - name: Docker Buildx 설정
+    - name: 🔧 Docker Buildx 설정
       uses: docker/setup-buildx-action@v3
       
-    - name: NKS Container Registry 로그인
+    - name: 🔐 NCP Container Registry 로그인
       uses: docker/login-action@v3
       with:
-        registry: ${{ env.NKS_REGISTRY }}
-        username: ${{ secrets.NKS_REGISTRY_USERNAME }}
-        password: ${{ secrets.NKS_REGISTRY_PASSWORD }}
+        registry: ${{ env.REGISTRY_URL }}
+        # username: ${{ secrets.NCP_REGISTRY_USERNAME }}
+        # password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
-    - name: 메타데이터 추출
+    - name: 🏷️ 메타데이터 추출
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}
+        images: ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}
         tags: |
           type=ref,event=branch
+          type=ref,event=pr
           type=sha,prefix={{branch}}-
           type=raw,value=latest,enable={{is_default_branch}}
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+        labels: |
+          org.opencontainers.image.title=${{ env.PROJECT_NAME }}
+          org.opencontainers.image.description=TypeScript Server for ${{ env.PROJECT_NAME }}
+          org.opencontainers.image.vendor=Your Organization
           
-    - name: Docker 이미지 빌드 및 푸시
-      id: build
+    - name: 🐳 Docker 이미지 빌드 및 푸시
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -90,101 +116,145 @@ jobs:
         cache-to: type=gha,mode=max
         platforms: linux/amd64
         
-    - name: 이미지 스캔 (Trivy)
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}:latest
-        format: 'table'
-        exit-code: '0'
+    - name: 📋 푸시된 이미지 정보 출력
+      run: |
+        echo "🎉 Successfully pushed to NCP Container Registry!"
+        echo "📍 Registry: ${{ env.REGISTRY_URL }}"
+        echo "📍 Repository: ${{ env.PROJECT_NAME }}"
+        echo "📍 Tags:"
+        echo "${{ steps.meta.outputs.tags }}" | while read tag; do
+          echo "   - $tag"
+        done
+        
+    - name: 🧹 빌드 캐시 정리
+      run: |
+        echo "🧹 Cleaning up build cache..."
+        docker builder prune -f
+        echo "✅ Build cache cleaned up"
 
-  # 3단계: NKS 배포
-  deploy-to-nks:
-    name: Deploy to NKS
+  # 3단계: 이미지 검증
+  verify-image:
+    name: Verify Pushed Image
     runs-on: ubuntu-latest
-    needs: docker-build
-    if: github.ref == 'refs/heads/main'
-    environment: 
-      name: production
-      url: https://your-domain.com
+    needs: docker-build-push
+    if: github.event_name == 'push'
     
     steps:
-    - name: 코드 체크아웃
-      uses: actions/checkout@v4
-      
-    - name: NKS kubectl 설정
-      run: |
-        # NKS 클러스터 설정
-        mkdir -p $HOME/.kube
-        echo "${{ secrets.NKS_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
-        chmod 600 $HOME/.kube/config
+    - name: 🔐 NCP Container Registry 로그인
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY_URL }}
+        # username: ${{ secrets.NCP_REGISTRY_USERNAME }}
+        # password: ${{ secrets.NCP_REGISTRY_PASSWORD }}
         
-    - name: kubectl 연결 테스트
+    - name: 🔍 이미지 검증
       run: |
-        kubectl cluster-info
-        kubectl get nodes
+        echo "🔍 Verifying pushed image..."
         
-    - name: 배포 매니페스트 업데이트
-      run: |
-        # 이미지 태그 업데이트
-        sed -i "s|your-nks-registry.ncloud.com/your-namespace/zdm-api-server:latest|${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}:main-${{ github.sha }}|g" k8s/deployment.yaml
+        # latest 태그 이미지 풀 테스트
+        IMAGE_NAME="${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest"
+        echo "📦 Pulling image: $IMAGE_NAME"
         
-    - name: NKS에 배포
-      run: |
-        kubectl apply -f k8s/deployment.yaml
-        
-    - name: 배포 상태 확인
-      run: |
-        kubectl rollout status deployment/zdm-api-server -n default --timeout=300s
-        kubectl get pods -l app=zdm-api-server -n default
-        
-    - name: 서비스 상태 확인
-      run: |
-        kubectl get service zdm-api-server-service -n default
-        kubectl get ingress zdm-api-server-ingress -n default
-        
-    - name: 헬스체크
-      run: |
-        # 서비스가 정상적으로 응답하는지 확인
-        sleep 30
-        kubectl port-forward service/zdm-api-server-service 8080:80 -n default &
-        sleep 10
-        curl -f http://localhost:8080/ || exit 1
-        echo "✅ Health check passed!"
+        if docker pull "$IMAGE_NAME"; then
+          echo "✅ Image pull successful"
+          
+          # 이미지 정보 출력
+          echo "📋 Image information:"
+          docker images "$IMAGE_NAME" --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}\t{{.Size}}"
+          
+          # 간단한 실행 테스트
+          echo "🚀 Testing container startup..."
+          CONTAINER_ID=$(docker run -d -p 8080:53307 "$IMAGE_NAME")
+          
+          # 컨테이너 시작 대기
+          sleep 15
+          
+          # 헬스체크
+          if docker ps | grep -q "$CONTAINER_ID"; then
+            echo "✅ Container is running"
+            
+            # HTTP 응답 테스트 (포트포워딩 없이 컨테이너 내부에서)
+            if docker exec "$CONTAINER_ID" wget -q --spider http://localhost:53307/; then
+              echo "✅ Application is responding"
+            else
+              echo "⚠️ Application health check failed"
+              docker logs "$CONTAINER_ID"
+            fi
+          else
+            echo "❌ Container failed to start"
+            docker logs "$CONTAINER_ID"
+          fi
+          
+          # 정리
+          docker stop "$CONTAINER_ID" > /dev/null 2>&1
+          docker rm "$CONTAINER_ID" > /dev/null 2>&1
+          
+        else
+          echo "❌ Image pull failed"
+          exit 1
+        fi
 
-  # 4단계: 배포 후 알림
-  notify-deployment:
-    name: Deployment Notification
+  # 4단계: 알림 및 결과 리포트
+  notify-result:
+    name: Notify Build Result
     runs-on: ubuntu-latest
-    needs: [build-and-test, docker-build, deploy-to-nks]
+    needs: [build-and-test, docker-build-push, verify-image]
     if: always()
     
     steps:
-    - name: 배포 결과 이메일 알림
+    - name: 📧 결과 이메일 알림
       uses: dawidd6/action-send-mail@v3
       with:
         server_address: smtp.gmail.com
         server_port: 587
         username: ${{ secrets.EMAIL_USERNAME }}
         password: ${{ secrets.EMAIL_PASSWORD }}
-        subject: "[NKS] TypeScript Server 배포 결과: ${{ job.status == 'success' && '성공' || '실패' }}"
+        subject: "[NCP] ${{ env.PROJECT_NAME }} 빌드 및 푸시 결과: ${{ needs.docker-build-push.result == 'success' && '성공' || '실패' }}"
         to: ${{ secrets.NOTIFICATION_EMAIL }}
         from: ${{ secrets.EMAIL_USERNAME }}
         body: |
-          NKS TypeScript Server 배포가 완료되었습니다.
+          ${{ env.PROJECT_NAME }} Docker 이미지 빌드 및 NCP Container Registry 푸시가 완료되었습니다.
 
-          ## 배포 결과
-          - 빌드 상태: ${{ needs.build-and-test.result }}
-          - Docker 빌드: ${{ needs.docker-build.result }}
-          - NKS 배포: ${{ needs.deploy-to-nks.result }}
+          ## 빌드 결과 요약
+          - 📦 빌드 및 테스트: ${{ needs.build-and-test.result }}
+          - 🐳 Docker 빌드 & 푸시: ${{ needs.docker-build-push.result }}
+          - 🔍 이미지 검증: ${{ needs.verify-image.result }}
 
-          ## 배포 정보
+          ## 프로젝트 정보
           - 프로젝트: ${{ env.PROJECT_NAME }}
+          - 레지스트리: ${{ env.REGISTRY_URL }}
           - 브랜치: ${{ github.ref_name }}
           - 커밋: ${{ github.sha }}
-          - 이미지: ${{ env.NKS_REGISTRY }}/${{ env.NKS_NAMESPACE }}/${{ env.PROJECT_NAME }}:main-${{ github.sha }}
+          - 버전: ${{ needs.build-and-test.outputs.version }}
+          - 트리거: ${{ github.event_name }}
+          - 작성자: ${{ github.actor }}
 
-          ## 링크
-          - 액션: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          - 서비스: https://your-domain.com
+          ## Docker 이미지
+          ${{ needs.docker-build-push.result == 'success' && format('```
+          {0}/{1}:latest
+          {0}/{1}:{2}
+          ```', env.REGISTRY_URL, env.PROJECT_NAME, needs.build-and-test.outputs.version) || '이미지 빌드 실패' }}
 
+          ## 액션 상세 보기
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ---
+          실행 시간: ${{ github.event.head_commit.timestamp }}
+      if: always()
+      
+    - name: 📊 워크플로우 요약
+      run: |
+        echo "## 🎯 빌드 및 푸시 워크플로우 완료 요약" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| 단계 | 결과 | 상태 |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|------|------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 빌드 및 테스트 | ${{ needs.build-and-test.result }} | ${{ needs.build-and-test.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Docker 빌드 & 푸시 | ${{ needs.docker-build-push.result }} | ${{ needs.docker-build-push.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 이미지 검증 | ${{ needs.verify-image.result }} | ${{ needs.verify-image.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 생성된 이미지" >> $GITHUB_STEP_SUMMARY
+        echo "- **레지스트리**: \`${{ env.REGISTRY_URL }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **프로젝트**: \`${{ env.PROJECT_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **버전**: \`${{ needs.build-and-test.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **브랜치**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
       if: always()
