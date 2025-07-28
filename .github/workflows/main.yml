@@ -229,7 +229,7 @@ jobs:
         
         # kubeconfig 파일 생성
         mkdir -p $HOME/.kube
-        echo "${{ secrets.KUBE_CONFIG_DATA }}" > $HOME/.kube/config
+        echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 -d > $HOME/.kube/config
         chmod 600 $HOME/.kube/config
         
         # 클러스터 연결 테스트
