@@ -194,7 +194,292 @@ jobs:
           exit 1
         fi
 
-  # 4단계: 알림 및 결과 리포트
+  # 4단계: GitHub Release 생성
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-and-test, docker-build-push, verify-image]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    
+    outputs:
+      release-url: ${{ steps.create_release.outputs.html_url }}
+      upload-url: ${{ steps.create_release.outputs.upload_url }}
+    
+    steps:
+    - name: 🛒 코드 체크아웃
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 전체 히스토리 가져오기 (릴리즈 노트 생성용)
+        
+    - name: 📝 릴리즈 노트 생성
+      id: release_notes
+      run: |
+        TAG_NAME=${GITHUB_REF#refs/tags/}
+        echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+        
+        # 이전 태그 찾기
+        PREVIOUS_TAG=$(git describe --tags --abbrev=0 "$TAG_NAME^" 2>/dev/null || echo "")
+        
+        # 릴리즈 노트 생성
+        RELEASE_NOTES_FILE="release_notes.md"
+        
+        echo "# 🚀 $TAG_NAME Release" > $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        
+        # Docker 이미지 정보 추가
+        echo "## 📦 Docker Images" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        echo "```bash" >> $RELEASE_NOTES_FILE
+        echo "# Pull the latest image" >> $RELEASE_NOTES_FILE
+        echo "docker pull ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:$TAG_NAME" >> $RELEASE_NOTES_FILE
+        echo "docker pull ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:latest" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        echo "# Run the container" >> $RELEASE_NOTES_FILE
+        echo "docker run -d -p 53307:53307 ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:$TAG_NAME" >> $RELEASE_NOTES_FILE
+        echo "```" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        
+        # 변경사항 추가
+        echo "## 📋 Changes" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        
+        if [ -n "$PREVIOUS_TAG" ]; then
+          echo "### 🔄 Changes since $PREVIOUS_TAG" >> $RELEASE_NOTES_FILE
+          echo "" >> $RELEASE_NOTES_FILE
+          
+          # 커밋 로그 생성
+          git log --pretty=format:"- %s (%h)" "$PREVIOUS_TAG..$TAG_NAME" >> $RELEASE_NOTES_FILE || echo "- Initial release" >> $RELEASE_NOTES_FILE
+        else
+          echo "### 🎉 Initial Release" >> $RELEASE_NOTES_FILE
+          echo "" >> $RELEASE_NOTES_FILE
+          echo "- First release of ${{ env.PROJECT_NAME }}" >> $RELEASE_NOTES_FILE
+        fi
+        
+        echo "" >> $RELEASE_NOTES_FILE
+        
+        # 기술 정보 추가
+        echo "## 🔧 Technical Information" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        echo "- **Node.js Version**: ${{ env.NODE_VERSION }}" >> $RELEASE_NOTES_FILE
+        echo "- **Build Date**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $RELEASE_NOTES_FILE
+        echo "- **Git Commit**: \`${{ github.sha }}\`" >> $RELEASE_NOTES_FILE
+        echo "- **Docker Registry**: ${{ env.REGISTRY_URL }}" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        
+        # 배포 가이드 추가
+        echo "## 🚀 Deployment" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        echo "### Kubernetes Deployment" >> $RELEASE_NOTES_FILE
+        echo "```yaml" >> $RELEASE_NOTES_FILE
+        echo "apiVersion: apps/v1" >> $RELEASE_NOTES_FILE
+        echo "kind: Deployment" >> $RELEASE_NOTES_FILE
+        echo "metadata:" >> $RELEASE_NOTES_FILE
+        echo "  name: ${{ env.PROJECT_NAME }}" >> $RELEASE_NOTES_FILE
+        echo "spec:" >> $RELEASE_NOTES_FILE
+        echo "  replicas: 3" >> $RELEASE_NOTES_FILE
+        echo "  template:" >> $RELEASE_NOTES_FILE
+        echo "    spec:" >> $RELEASE_NOTES_FILE
+        echo "      containers:" >> $RELEASE_NOTES_FILE
+        echo "      - name: app" >> $RELEASE_NOTES_FILE
+        echo "        image: ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:$TAG_NAME" >> $RELEASE_NOTES_FILE
+        echo "        ports:" >> $RELEASE_NOTES_FILE
+        echo "        - containerPort: 53307" >> $RELEASE_NOTES_FILE
+        echo "```" >> $RELEASE_NOTES_FILE
+        echo "" >> $RELEASE_NOTES_FILE
+        
+        # 릴리즈 노트 내용을 GitHub Output으로 설정
+        {
+          echo 'release_notes<<EOF'
+          cat $RELEASE_NOTES_FILE
+          echo 'EOF'
+        } >> $GITHUB_OUTPUT
+        
+        echo "📝 Release notes generated for $TAG_NAME"
+        cat $RELEASE_NOTES_FILE
+        
+    - name: 🎉 GitHub Release 생성
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.release_notes.outputs.tag_name }}
+        release_name: "Release ${{ steps.release_notes.outputs.tag_name }}"
+        body: ${{ steps.release_notes.outputs.release_notes }}
+        draft: false
+        prerelease: ${{ contains(steps.release_notes.outputs.tag_name, 'alpha') || contains(steps.release_notes.outputs.tag_name, 'beta') || contains(steps.release_notes.outputs.tag_name, 'rc') }}
+        
+    - name: 📦 릴리즈 아티팩트 준비
+      run: |
+        # 릴리즈에 첨부할 파일들 준비
+        mkdir -p release-artifacts
+        
+        # package.json 복사
+        cp package.json release-artifacts/
+        
+        # Docker 실행 스크립트 생성
+        cat > release-artifacts/run-docker.sh << 'EOF'
+        #!/bin/bash
+        # ${{ env.PROJECT_NAME }} ${{ steps.release_notes.outputs.tag_name }} 실행 스크립트
+        
+        echo "🚀 Starting ${{ env.PROJECT_NAME }} ${{ steps.release_notes.outputs.tag_name }}"
+        
+        # 이미지 풀
+        docker pull ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${{ steps.release_notes.outputs.tag_name }}
+        
+        # 컨테이너 실행
+        docker run -d \
+          --name ${{ env.PROJECT_NAME }}-${{ steps.release_notes.outputs.tag_name }} \
+          -p 53307:53307 \
+          --restart unless-stopped \
+          ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${{ steps.release_notes.outputs.tag_name }}
+        
+        echo "✅ ${{ env.PROJECT_NAME }} started on port 53307"
+        echo "🌐 Access: http://localhost:53307"
+        EOF
+        
+        chmod +x release-artifacts/run-docker.sh
+        
+        # Kubernetes 배포 매니페스트 생성
+        cat > release-artifacts/k8s-deployment.yaml << EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${{ env.PROJECT_NAME }}
+          labels:
+            app: ${{ env.PROJECT_NAME }}
+            version: ${{ steps.release_notes.outputs.tag_name }}
+        spec:
+          replicas: 3
+          selector:
+            matchLabels:
+              app: ${{ env.PROJECT_NAME }}
+          template:
+            metadata:
+              labels:
+                app: ${{ env.PROJECT_NAME }}
+                version: ${{ steps.release_notes.outputs.tag_name }}
+            spec:
+              containers:
+              - name: app
+                image: ${{ env.REGISTRY_URL }}/${{ env.PROJECT_NAME }}:${{ steps.release_notes.outputs.tag_name }}
+                ports:
+                - containerPort: 53307
+                env:
+                - name: PORT
+                  value: "53307"
+                - name: NODE_ENV
+                  value: "production"
+                resources:
+                  requests:
+                    memory: "256Mi"
+                    cpu: "250m"
+                  limits:
+                    memory: "512Mi"
+                    cpu: "500m"
+                livenessProbe:
+                  httpGet:
+                    path: /
+                    port: 53307
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                readinessProbe:
+                  httpGet:
+                    path: /
+                    port: 53307
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${{ env.PROJECT_NAME }}-service
+          labels:
+            app: ${{ env.PROJECT_NAME }}
+        spec:
+          selector:
+            app: ${{ env.PROJECT_NAME }}
+          ports:
+          - name: http
+            port: 80
+            targetPort: 53307
+            protocol: TCP
+          type: ClusterIP
+        EOF
+        
+        # 아티팩트 목록 생성
+        cat > release-artifacts/README.md << EOF
+        # ${{ env.PROJECT_NAME }} ${{ steps.release_notes.outputs.tag_name }} Release Files
+        
+        ## 📦 포함된 파일들
+        
+        - \`package.json\`: 프로젝트 의존성 정보
+        - \`run-docker.sh\`: Docker 컨테이너 실행 스크립트
+        - \`k8s-deployment.yaml\`: Kubernetes 배포 매니페스트
+        - \`README.md\`: 이 파일
+        
+        ## 🚀 빠른 시작
+        
+        ### Docker로 실행
+        \`\`\`bash
+        chmod +x run-docker.sh
+        ./run-docker.sh
+        \`\`\`
+        
+        ### Kubernetes에 배포
+        \`\`\`bash
+        kubectl apply -f k8s-deployment.yaml
+        \`\`\`
+        
+        ## 📞 문의
+        
+        문제가 있거나 질문이 있으시면 이슈를 생성해주세요.
+        EOF
+        
+        echo "📦 Release artifacts prepared"
+        ls -la release-artifacts/
+        
+    - name: 📎 아티팩트 파일 업로드
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: release-artifacts/run-docker.sh
+        asset_name: run-docker.sh
+        asset_content_type: application/x-sh
+        
+    - name: 📎 Kubernetes 매니페스트 업로드
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: release-artifacts/k8s-deployment.yaml
+        asset_name: k8s-deployment.yaml
+        asset_content_type: application/x-yaml
+        
+    - name: 📎 패키지 정보 업로드
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: release-artifacts/package.json
+        asset_name: package.json
+        asset_content_type: application/json
+        
+    - name: 📎 README 업로드
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: release-artifacts/README.md
+        asset_name: README.md
+        asset_content_type: text/markdown
+
+  # 5단계: 알림 및 결과 리포트
   notify-result:
     name: Notify Build Result
     runs-on: ubuntu-latest
