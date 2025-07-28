@@ -199,7 +199,7 @@ jobs:
           exit 1
         fi
 
-  # 4단계: CD - Kubernetes 배포 (NEW!)
+  # 4단계: CD - Kubernetes 배포
   deploy-to-kubernetes:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
@@ -223,20 +223,59 @@ jobs:
       with:
         version: 'v1.28.0'
         
-    - name: 🔐 NKS 클러스터 인증 설정
+    - name: 🔐 NKS 클러스터 인증 설정 (Service Account Token)
       run: |
-        echo "🔐 Setting up NKS cluster authentication..."
+        echo "🔐 Setting up NKS cluster authentication with Service Account Token..."
         
-        # kubeconfig 파일 생성
+        # Secret 값 검증
+        if [ -z "${{ secrets.KUBE_CONFIG_DATA }}" ]; then
+          echo "❌ KUBE_CONFIG_DATA secret is empty!"
+          exit 1
+        fi
+        
+        # kubeconfig 파일 생성 (Service Account Token 방식)
         mkdir -p $HOME/.kube
+        echo "🔍 Creating kubeconfig file..."
         echo "${{ secrets.KUBE_CONFIG_DATA }}" > $HOME/.kube/config
         chmod 600 $HOME/.kube/config
         
+        # kubeconfig 파일 검증
+        if [ ! -s $HOME/.kube/config ]; then
+          echo "❌ kubeconfig file is empty!"
+          exit 1
+        fi
+        
+        echo "✅ kubeconfig file created successfully"
+        echo "📋 Config file size: $(wc -c < $HOME/.kube/config) bytes"
+        
+        # kubeconfig가 Service Account Token 방식인지 확인
+        echo "📋 kubeconfig authentication method check:"
+        if grep -q "token:" $HOME/.kube/config; then
+          echo "✅ Service Account Token authentication detected"
+        elif grep -q "ncp-iam-authenticator" $HOME/.kube/config; then
+          echo "❌ ncp-iam-authenticator method detected - this requires additional setup"
+          echo "Please use Service Account Token method instead"
+          exit 1
+        else
+          echo "⚠️ Unknown authentication method"
+        fi
+        
         # 클러스터 연결 테스트
-        kubectl cluster-info
+        echo "🔍 Testing cluster connection..."
+        if ! kubectl cluster-info; then
+          echo "❌ Failed to connect to cluster"
+          echo "📋 kubeconfig content (first 10 lines):"
+          head -10 $HOME/.kube/config
+          exit 1
+        fi
+        
+        echo "🔍 Testing node access..."
         kubectl get nodes
         
-        echo "✅ Successfully connected to NKS cluster"
+        echo "🔍 Testing namespace access..."
+        kubectl get namespaces
+        
+        echo "✅ Successfully connected to NKS cluster using Service Account Token"
         
     - name: 🔍 현재 배포 상태 확인
       run: |
@@ -403,7 +442,7 @@ jobs:
         echo "  -n ${{ env.K8S_NAMESPACE }}" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
-  # 5단계: 알림 및 결과 리포트 (업데이트됨)
+  # 5단계: 알림 및 결과 리포트
   notify-result:
     name: Notify Build Result
     runs-on: ubuntu-latest

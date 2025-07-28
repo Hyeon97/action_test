@@ -96,3 +96,62 @@ kubectl delete secret ncp-registry-secret -n zdm-api
 # 99. Pod 삭제
 kubectl delete pod zdm-api-server -n zdm-api
 ```
+
+# bastion 서버에 SSH 접속 후 실행
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-actions
+  namespace: kube-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-actions-token
+  namespace: kube-system
+  annotations:
+    kubernetes.io/service-account.name: github-actions
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: github-actions-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: github-actions
+  namespace: kube-system
+EOF
+
+# Token과 인증서 정보 추출
+TOKEN=$(kubectl get secret github-actions-token -n kube-system -o jsonpath='{.data.token}' | base64 -d)
+CA_CERT=$(kubectl get secret github-actions-token -n kube-system -o jsonpath='{.data.ca\.crt}')
+CLUSTER_URL=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+
+# 새로운 kubeconfig 생성
+cat > github-actions-kubeconfig.yaml << EOF
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: ${CA_CERT}
+    server: ${CLUSTER_URL}
+  name: nks-cluster
+contexts:
+- context:
+    cluster: nks-cluster
+    user: github-actions
+  name: github-actions@nks-cluster
+current-context: github-actions@nks-cluster
+users:
+- name: github-actions
+  user:
+    token: ${TOKEN}
+EOF
+
+echo "✅ Service Account kubeconfig 생성 완료!"
