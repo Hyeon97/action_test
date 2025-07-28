@@ -2,9 +2,9 @@ name: Build and Push to NCP Container Registry
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ '**' ]  # 모든 브랜치에서 실행
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
 
 # GitHub Actions 권한 설정
 permissions:
@@ -71,7 +71,10 @@ jobs:
     name: Docker Build and Push to NCP
     runs-on: ubuntu-latest
     needs: build-and-test
-    if: github.event_name == 'push'
+    # main, develop 브랜치의 push 이벤트에서만 실행
+    if: |
+      github.event_name == 'push' && 
+      (github.ref_name == 'main' || github.ref_name == 'develop')
     
     steps:
     - name: 🛒 코드 체크아웃
@@ -132,7 +135,10 @@ jobs:
     name: Verify Pushed Image
     runs-on: ubuntu-latest
     needs: docker-build-push
-    if: github.event_name == 'push'
+    # Docker 이미지가 푸시된 경우에만 실행
+    if: |
+      github.event_name == 'push' && 
+      (github.ref_name == 'main' || github.ref_name == 'develop')
     
     steps:
     - name: 🔐 NCP Container Registry 로그인
