@@ -190,7 +190,7 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
-
+  
   # 5단계: 릴리스 노트 생성
   create-release:
     name: 릴리스 생성

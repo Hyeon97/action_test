@@ -377,3 +377,21 @@ jobs:
         publish: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+
+        # 배포 조건
+# 1) backend/develop -> develop MERGE
+# 2) Labeling
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - develop
+
+jobs:
+  deploy:
+    if: github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'backend') &&
+      contains(github.event.pull_request.labels.*.name, 'operation')
+    runs-on: ubuntu-latest

@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-53307}:${PORT:-53307}"
+    environment:
+      - PORT=${PORT:-53307}
+      - NODE_ENV=${NODE_ENV:-production}
+    env_file:
+      - .env
+    restart: unless-stopped
